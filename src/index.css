@@ -1,0 +1,243 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Manrope', ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+
+  /* Deepen backgrounds - Mapping Slate to Zinc/Black mixes for that "premium" feel */
+  --color-slate-50: #fafafa;
+  --color-slate-100: #f4f4f5;
+  --color-slate-200: #e4e4e7;
+  --color-slate-300: #d4d4d8;
+  --color-slate-400: #a1a1aa;
+  --color-slate-500: #71717a;
+  --color-slate-600: #52525b;
+  --color-slate-700: #3f3f46;
+  --color-slate-800: #27272a;
+  --color-slate-900: #18181b;
+  --color-slate-950: #09090b;
+}
+
+/* ═══════════════════════════════════════════════════════
+   YükCep — Cinematic Splash & Micro-interactions
+   ═══════════════════════════════════════════════════════ */
+
+/* Custom Utilities for Visual Polish */
+.glass-card {
+  @apply backdrop-blur-xl bg-slate-900/60 border border-white/5;
+}
+
+.btn-glow {
+  @apply shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/40 transition-all duration-300;
+}
+
+.hover-scale {
+  @apply hover:scale-105 transition-transform duration-200 ease-out;
+}
+
+/* Tracking for Headings */
+h1, h2, h3, h4, h5, h6 {
+  @apply tracking-tight;
+}
+
+/* ─── SPLASH SCREEN ─── */
+@keyframes splash-fade-out {
+  0% { opacity: 1; }
+  100% { opacity: 0; pointer-events: none; }
+}
+@keyframes splash-road-scroll {
+  0% { background-position: 0 0; }
+  100% { background-position: -200px 0; }
+}
+@keyframes splash-truck-drive {
+  0% { transform: translateX(-120px) translateY(0); opacity: 0; }
+  15% { opacity: 1; }
+  50% { transform: translateX(calc(50vw - 60px)) translateY(0); }
+  55% { transform: translateX(calc(50vw - 60px)) translateY(-3px); }
+  60% { transform: translateX(calc(50vw - 60px)) translateY(0); }
+  100% { transform: translateX(calc(50vw - 60px)) translateY(0); opacity: 1; }
+}
+@keyframes splash-title-reveal {
+  0% { opacity: 0; transform: translateY(30px) scale(0.8); filter: blur(10px); }
+  60% { opacity: 1; transform: translateY(0) scale(1.05); filter: blur(0); }
+  80% { transform: translateY(0) scale(0.98); }
+  100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+@keyframes splash-subtitle-reveal {
+  0% { opacity: 0; transform: translateY(20px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes splash-glow-pulse {
+  0%, 100% { text-shadow: 0 0 20px rgba(59,130,246,0.5), 0 0 40px rgba(59,130,246,0.3), 0 0 80px rgba(59,130,246,0.1); }
+  50% { text-shadow: 0 0 30px rgba(59,130,246,0.8), 0 0 60px rgba(59,130,246,0.5), 0 0 120px rgba(59,130,246,0.2); }
+}
+@keyframes particle-float {
+  0% { transform: translateY(0) translateX(0) scale(1); opacity: 0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translateY(-100vh) translateX(var(--drift)) scale(0); opacity: 0; }
+}
+@keyframes road-dash {
+  0% { stroke-dashoffset: 0; }
+  100% { stroke-dashoffset: -30; }
+}
+@keyframes splash-truck-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes exhaust-puff {
+  0% { transform: scale(0.3) translateX(0); opacity: 0.8; }
+  100% { transform: scale(2) translateX(-30px); opacity: 0; }
+}
+@keyframes speedline {
+  0% { transform: scaleX(0); opacity: 0; }
+  30% { opacity: 0.6; }
+  100% { transform: scaleX(1); opacity: 0; }
+}
+
+.splash-container {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, #09090b 0%, #18181b 40%, #000000 100%); /* Updated gradient */
+  overflow: hidden;
+}
+.splash-container.fade-out {
+  animation: splash-fade-out 0.6s ease-in-out forwards;
+}
+
+.splash-particle {
+  position: absolute;
+  bottom: -10px;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: particle-float linear infinite;
+}
+
+.splash-title {
+  animation: splash-title-reveal 1s cubic-bezier(0.16, 1, 0.3, 1) 0.8s both;
+}
+.splash-title-glow {
+  animation: splash-glow-pulse 2s ease-in-out infinite;
+}
+.splash-subtitle {
+  animation: splash-subtitle-reveal 0.8s ease-out 1.4s both;
+}
+.splash-truck-bounce {
+  animation: splash-truck-bounce 0.6s ease-in-out infinite;
+}
+
+/* ─── PAGE TRANSITIONS ─── */
+@keyframes page-slide-in {
+  0% { opacity: 0; transform: translateY(20px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes page-slide-out {
+  0% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-10px); }
+}
+.page-enter {
+  animation: page-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ─── CONFETTI ─── */
+@keyframes confetti-fall {
+  0% { transform: translateY(0) rotate(0deg) scale(1); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg) scale(0.5); opacity: 0; }
+}
+@keyframes confetti-spread {
+  0% { transform: translate(0, 0) rotate(0deg); }
+  100% { transform: translate(var(--cx), var(--cy)) rotate(var(--cr)); opacity: 0; }
+}
+.confetti-piece {
+  position: fixed;
+  z-index: 9998;
+  pointer-events: none;
+  animation: confetti-fall linear forwards;
+}
+
+/* ─── RIPPLE ─── */
+@keyframes ripple-expand {
+  0% { transform: scale(0); opacity: 0.35; }
+  100% { transform: scale(4); opacity: 0; }
+}
+.ripple-effect {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  animation: ripple-expand 0.6s ease-out forwards;
+}
+
+/* ─── SKELETON SHIMMER ─── */
+@keyframes skeleton-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton-loader {
+  background: linear-gradient(90deg, #27272a 25%, #3f3f46 50%, #27272a 75%); /* Updated colors */
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+  border-radius: 12px;
+}
+
+/* ─── TURKEY MAP HEATMAP ─── */
+@keyframes city-pulse {
+  0%, 100% { r: var(--r-base); opacity: 0.8; }
+  50% { r: var(--r-pulse); opacity: 1; }
+}
+@keyframes city-ring {
+  0% { r: var(--r-base); opacity: 0.4; stroke-width: 1.5; }
+  100% { r: calc(var(--r-base) + 6); opacity: 0; stroke-width: 0.3; }
+}
+@keyframes heatmap-glow {
+  0%, 100% { filter: blur(8px); opacity: 0.3; }
+  50% { filter: blur(12px); opacity: 0.5; }
+}
+
+/* ─── COUNTER ANIMATION ─── */
+@keyframes counter-pop {
+  0% { transform: scale(0.5); opacity: 0; }
+  60% { transform: scale(1.1); }
+  100% { transform: scale(1); opacity: 1; }
+}
+.counter-pop {
+  animation: counter-pop 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ─── FLOATING GLOW ORBS (background decoration) ─── */
+@keyframes orb-float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(30px, -20px) scale(1.1); }
+  50% { transform: translate(-20px, -40px) scale(0.9); }
+  75% { transform: translate(10px, -10px) scale(1.05); }
+}
+
+/* ─── LOADING DOTS ─── */
+@keyframes loading-dot {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.3; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* ─── SMOOTH SCROLLBAR ─── */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #3f3f46; /* Updated color */
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b; /* Updated color */
+}
+
+/* ─── STAR SHINE ─── */
+@keyframes star-twinkle {
+  0%, 100% { opacity: 0.1; }
+  50% { opacity: 0.8; }
+}
