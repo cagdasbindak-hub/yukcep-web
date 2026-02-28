@@ -59,6 +59,9 @@ const empReviews = {
 const getER = name => empReviews[name] || empReviews["default"];
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-02-28", title: "Profil menüsüne açılır Ayarlar paneli (hazır/placeholder) eklendi." },
+  { date: "2026-02-28", title: "Çıkış Yap akışı timeout + local fallback ile güvenilir hale getirildi." },
+  { date: "2026-02-28", title: "Profil kartında rol etiketi netleştirildi: İşverenim / İş Arıyorum." },
   { date: "2026-02-28", title: "İlan yayınlama sırasında formu kilitleyen temalı bekleme animasyonu eklendi." },
   { date: "2026-02-28", title: "Runtime logları için Supabase runtime_logs kuyruğu ve otomatik flush eklendi." },
   { date: "2026-02-28", title: "Yük listeleme akışına Supabase timeout sonrası REST fallback eklendi." },
@@ -283,6 +286,7 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [showProfileCard, setShowProfileCard] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [selectedLoadDetail, setSelectedLoadDetail] = useState(null);
 
   // NOTIFICATIONS
@@ -903,11 +907,43 @@ export default function App() {
   }, []);
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-    setProfile(null);
+    appendRuntimeLog("info", "LOGOUT_STARTED", "Kullanici cikis istegi gonderdi.");
     setShowProfileCard(false);
-    showToast("👋 Çıkış yapıldı");
+    setShowSettingsPanel(false);
+
+    const forceLocalLogout = () => {
+      const authStorageKey = getSupabaseStorageKey();
+      if (authStorageKey) {
+        try {
+          localStorage.removeItem(authStorageKey);
+        } catch {
+          // ignore storage failures
+        }
+      }
+      setUser(null);
+      setProfile(null);
+      setScreen("welcome");
+    };
+
+    try {
+      await withTimeout(
+        supabase.auth.signOut(),
+        8000,
+        "Çıkış isteği zaman aşımına uğradı (8sn)."
+      );
+      forceLocalLogout();
+      appendRuntimeLog("info", "LOGOUT_SUCCESS", "Supabase signOut tamamlandi.");
+      showToast("👋 Çıkış yapıldı");
+    } catch (error) {
+      appendRuntimeLog("warn", "LOGOUT_FALLBACK", error?.message || "SignOut failed");
+      forceLocalLogout();
+      try {
+        await supabase.auth.signOut({ scope: "local" });
+      } catch {
+        // noop
+      }
+      showToast("Oturum yerelde kapatıldı.", "success", 5000);
+    }
   };
 
   const handleAuthSuccess = (authUser, authProfile) => {
@@ -926,6 +962,8 @@ export default function App() {
       .toUpperCase()
       .slice(0, 2);
   };
+
+  const getProfileRoleLabel = (role) => (role === "employer" ? "İşverenim" : "İş Arıyorum");
 
   // ─── FILTERS ───
   const [filterFrom, setFilterFrom] = useState("");
@@ -1414,10 +1452,10 @@ export default function App() {
                                 </div>
                               </div>
                               <div>
-                                <p className="text-white font-bold text-base tracking-tight">{profile?.full_name || "Kullanıcı"}</p>
+                                <p className="text-white font-bold text-base tracking-tight">{profile?.full_name || getProfileRoleLabel(profile?.role)}</p>
                                 <p className="text-slate-400 text-xs font-medium mb-1">{user.email}</p>
                                 <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${profile?.role === "driver" ? "bg-blue-500/10 text-blue-400 border-blue-500/20" : "bg-orange-500/10 text-orange-400 border-orange-500/20"}`}>
-                                  {profile?.role === "driver" ? "🚛 Şoför" : "🏢 İşveren"}
+                                  {profile?.role === "driver" ? "🚛 İş Arıyorum" : "🏢 İşverenim"}
                                 </span>
                               </div>
                             </div>
@@ -1429,7 +1467,13 @@ export default function App() {
                             </div>
                           )}
                           <div className="p-2 space-y-1">
-                            <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-slate-300 font-bold text-sm hover:bg-white/5 transition-all active:scale-95 group">
+                            <button
+                              onClick={() => {
+                                setShowProfileCard(false);
+                                setShowSettingsPanel(true);
+                              }}
+                              className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-slate-300 font-bold text-sm hover:bg-white/5 transition-all active:scale-95 group"
+                            >
                               <span className="bg-slate-800 p-1.5 rounded-lg group-hover:bg-slate-700 transition-colors">⚙️</span>
                               Ayarlar
                             </button>
@@ -2269,6 +2313,57 @@ export default function App() {
           )}
           </div>{/* end page-enter */}
         </div>
+
+        {showSettingsPanel && (
+          <div
+            className="absolute inset-0 z-[92] bg-slate-950/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-3"
+            onClick={() => setShowSettingsPanel(false)}
+          >
+            <div
+              className="w-full max-w-sm rounded-3xl border border-slate-700/60 bg-slate-900/95 shadow-2xl overflow-hidden animate-in slide-in-from-bottom-6 fade-in duration-200"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-5 py-4 border-b border-slate-700/50 bg-gradient-to-r from-blue-600/15 to-cyan-500/15 flex items-center justify-between">
+                <div>
+                  <p className="text-white text-lg font-black tracking-tight">⚙️ Ayarlar</p>
+                  <p className="text-slate-400 text-xs">Hazırlık ekranı (yakında aktif)</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsPanel(false)}
+                  className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 text-slate-300 hover:text-white"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="p-4 space-y-3">
+                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50">
+                  <p className="text-white text-sm font-bold">Bildirim Tercihleri</p>
+                  <p className="text-slate-400 text-xs mt-1">İlan, teklif ve mesaj bildirimlerini özelleştirme</p>
+                  <span className="inline-block mt-2 text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/25">Yakında</span>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50">
+                  <p className="text-white text-sm font-bold">Görünüm</p>
+                  <p className="text-slate-400 text-xs mt-1">Tema, kart yoğunluğu ve yazı boyutu seçenekleri</p>
+                  <span className="inline-block mt-2 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">Hazırlandı</span>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50">
+                  <p className="text-white text-sm font-bold">Gizlilik ve Güvenlik</p>
+                  <p className="text-slate-400 text-xs mt-1">Oturum, cihaz ve veri paylaşımı tercihleri</p>
+                  <span className="inline-block mt-2 text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/25">Planlandı</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsPanel(false)}
+                  className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm transition-all active:scale-95"
+                >
+                  Kapat
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ═══════════════════ LIVE SUPPORT CHAT ═══════════════════ */}
         {chatOpen && (
