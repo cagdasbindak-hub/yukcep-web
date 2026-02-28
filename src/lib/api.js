@@ -9,6 +9,16 @@ const unwrap = (result, context) => {
   return result.data;
 };
 
+const normalizeCityKey = (value = "") =>
+  value
+    .toString()
+    .trim()
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ı/g, "i")
+    .replace(/[^a-z0-9]/g, "");
+
 export const fetchProfileById = async (userId) => {
   const res = await supabase.from("profiles").select("*").eq("id", userId).single();
   return unwrap(res, "Failed to fetch profile");
@@ -124,12 +134,25 @@ export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => 
     .select("*, profiles:employer_id(*)")
     .order("created_at", { ascending: false });
 
-  if (filterFrom) query = query.eq("origin_city", filterFrom);
-  if (filterTo) query = query.eq("destination_city", filterTo);
+  // Trailer tipi net bir enum oldugu icin DB tarafinda filtrelenebilir.
   if (filterTrailer) query = query.eq("trailer_type", filterTrailer);
 
   const res = await query;
-  return unwrap(res, "Failed to fetch loads");
+  const data = unwrap(res, "Failed to fetch loads");
+
+  const fromKey = normalizeCityKey(filterFrom);
+  const toKey = normalizeCityKey(filterTo);
+
+  if (!fromKey && !toKey) return data;
+
+  // Sehir adlarinda olasi karakter/case farklari nedeniyle istemci tarafinda normalize filtre.
+  return data.filter((load) => {
+    const originKey = normalizeCityKey(load.origin_city);
+    const destinationKey = normalizeCityKey(load.destination_city);
+    if (fromKey && originKey !== fromKey) return false;
+    if (toKey && destinationKey !== toKey) return false;
+    return true;
+  });
 };
 
 export const createLoadApi = async (loadData) => {

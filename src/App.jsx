@@ -305,6 +305,9 @@ export default function App() {
 
   const handleLocationSelect = useCallback((selectedCity) => {
     if (!selectedCity) return;
+    setFilterFrom(selectedCity);
+    setFilterTo("");
+    setFilterTrailer("");
     setCity(selectedCity);
     setLocationQuery("");
     nav("map");
@@ -554,6 +557,24 @@ export default function App() {
     fetchLoads();
   }, [fetchLoads]);
 
+  // Keep map/list in sync with new inserts/updates from any user session.
+  useEffect(() => {
+    const channel = supabase
+      .channel("public:loads-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "loads" },
+        () => {
+          fetchLoads();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [fetchLoads]);
+
   // Form Validation
   const validateForm = () => {
     const errors = {};
@@ -599,6 +620,7 @@ export default function App() {
         setTimeout(() => setShowConfetti(false), 100);
         setEmpForm({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
         setFormErrors({});
+        await fetchLoads();
       } catch (error) {
         console.error("Insert error:", error);
         showToast(`❌ Hata: ${error.message}`, "error");
