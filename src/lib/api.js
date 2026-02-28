@@ -377,6 +377,73 @@ export const createNotificationApi = async ({ userId, actorId, message }) => {
   return unwrap(res, "Failed to create notification");
 };
 
+const postNotificationViaRest = async ({ payload, accessToken, timeoutMs }) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/notifications`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await res.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+
+    if (!res.ok) {
+      const message =
+        (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
+        text ||
+        `HTTP ${res.status}`;
+      throw new Error(`REST notification insert failed: ${message}`);
+    }
+
+    if (Array.isArray(parsed) && parsed[0]) return parsed[0];
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`REST notification insert timeout after ${timeoutMs / 1000}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+export const createNotificationViaRestApi = async ({
+  userId,
+  actorId,
+  message,
+  accessToken,
+  timeoutMs = 12000,
+}) => {
+  if (!accessToken) {
+    throw new Error("REST notification insert requires a valid access token.");
+  }
+  return postNotificationViaRest({
+    payload: {
+      user_id: userId,
+      actor_id: actorId,
+      message,
+      is_read: false,
+    },
+    accessToken,
+    timeoutMs,
+  });
+};
+
 export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => {
   let query = supabase
     .from("loads")

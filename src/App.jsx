@@ -7,6 +7,7 @@ import {
   createLoadApi,
   createLoadViaRestApi,
   createNotificationApi,
+  createNotificationViaRestApi,
   ensureProfileApi,
   fetchDriverFeedApi,
   fetchBidsForLoadApi,
@@ -897,6 +898,7 @@ export default function App() {
 
     try {
       const accessToken = readCachedAccessToken();
+      let createdBid = null;
       const createBidWithBestRoute = async (timeoutMs) => {
         if (accessToken) {
           return createBidViaRestApi({
@@ -920,11 +922,11 @@ export default function App() {
 
       // 1. Insert Bid (timeout + retry to avoid sticky "Gönderiliyor..." state)
       try {
-        await createBidWithBestRoute(15000);
+        createdBid = await createBidWithBestRoute(15000);
       } catch (firstBidError) {
         appendRuntimeLog("warn", "BID_SUBMIT_RETRY", firstBidError?.message || "Bid timeout, retrying");
         try {
-          await createBidWithBestRoute(25000);
+          createdBid = await createBidWithBestRoute(25000);
         } catch (secondBidError) {
           const message = String(secondBidError?.message || "").toLocaleLowerCase("tr-TR");
           const isDuplicate =
@@ -944,6 +946,7 @@ export default function App() {
           }
 
           if (isDuplicate || existingBid) {
+            createdBid = existingBid || createdBid;
             appendRuntimeLog(
               "warn",
               "BID_SUBMIT_RECOVERED",
@@ -957,15 +960,27 @@ export default function App() {
 
       // 2. Notify Employer (non-blocking for bidder UX)
       try {
-        await withTimeout(
-          createNotificationApi({
+        const bidIdTag = createdBid?.id ? `[BID:${createdBid.id}] ` : "";
+        const notifyMessage = `Yeni Teklif ${bidIdTag}${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ${price}₺`;
+        if (accessToken) {
+          await createNotificationViaRestApi({
             userId: selectedLoadDetail.raw.employer_id,
             actorId: user.id,
-            message: `Yeni Teklif: ${profile?.full_name || "Bir şoför"} ilanınıza ${price}₺ teklif verdi.`,
-          }),
-          10000,
-          "Teklif bildirimi zaman aşımına uğradı (10sn)."
-        );
+            message: notifyMessage,
+            accessToken,
+            timeoutMs: 9000,
+          });
+        } else {
+          await withTimeout(
+            createNotificationApi({
+              userId: selectedLoadDetail.raw.employer_id,
+              actorId: user.id,
+              message: notifyMessage,
+            }),
+            10000,
+            "Teklif bildirimi zaman aşımına uğradı (10sn)."
+          );
+        }
       } catch (notifyError) {
         appendRuntimeLog("warn", "BID_NOTIFY_WARN", notifyError?.message || "Notification timeout");
       }
@@ -1568,6 +1583,44 @@ export default function App() {
   };
 
   const loads = realLoads; // Filtering is handled in Supabase query now
+  const employerNotificationBids = useMemo(() => {
+    if (!selectedLoadDetail || !user || selectedLoadDetail.raw?.employer_id !== user.id) return [];
+    const fromKey = normalizeCityKey(selectedLoadDetail.from || "");
+    const toKey = normalizeCityKey(selectedLoadDetail.to || "");
+    const messageBids = new Map();
+
+    notifications.forEach((notification) => {
+      const message = String(notification?.message || "");
+      if (!/yeni teklif/i.test(message)) return;
+      const normalizedMessage = normalizeCityKey(message);
+      if (fromKey && !normalizedMessage.includes(fromKey)) return;
+      if (toKey && !normalizedMessage.includes(toKey)) return;
+
+      const bidIdMatch = message.match(/\[BID:(\d+)\]/i);
+      const bidId = bidIdMatch ? Number(bidIdMatch[1]) : null;
+      if (!bidId || Number.isNaN(bidId) || messageBids.has(bidId)) return;
+
+      const priceMatch = message.match(/(\d+(?:[.,]\d+)?)\s*₺/);
+      const bidPriceValue = priceMatch ? Number(String(priceMatch[1]).replace(",", ".")) : 0;
+
+      messageBids.set(bidId, {
+        id: bidId,
+        driver_id: notification?.actor_id || null,
+        price: bidPriceValue,
+        status: "PENDING",
+        created_at: notification?.created_at || new Date().toISOString(),
+        driver: {
+          full_name: "Şoför",
+          rating: "5.0",
+        },
+      });
+    });
+
+    return Array.from(messageBids.values()).sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+  }, [notifications, selectedLoadDetail, user]);
+  const employerBidRows = loadBids.length > 0 ? loadBids : employerNotificationBids;
 
   const e2eChecklist = useMemo(() => {
     const recentErrors = runtimeLogs.slice(0, 40).filter((log) => log.level === "error");
@@ -2556,10 +2609,16 @@ export default function App() {
                     {selectedLoadDetail.raw?.employer_id === user.id ? (
                       /* EMPLOYER VIEW: List Bids */
                       <div className="space-y-3">
-                        {loadBids.length === 0 ? (
+                        {employerBidRows.length === 0 ? (
                           <p className="text-slate-400 text-sm text-center py-4">Henüz teklif gelmedi.</p>
                         ) : (
-                          loadBids.map((bid) => (
+                          <>
+                            {loadBids.length === 0 && employerNotificationBids.length > 0 && (
+                              <p className="text-[11px] text-cyan-300 font-bold text-center py-1">
+                                Bildirim tabanlı teklif görünümü aktif (DB fallback).
+                              </p>
+                            )}
+                            {employerBidRows.map((bid) => (
                             <div key={bid.id} className="p-3 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-between">
                               <div>
                                 <div className="flex items-center gap-2 mb-1">
@@ -2595,7 +2654,8 @@ export default function App() {
                                 )}
                               </div>
                             </div>
-                          ))
+                            ))}
+                          </>
                         )}
                       </div>
                     ) : (
