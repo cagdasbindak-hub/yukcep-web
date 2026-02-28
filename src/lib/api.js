@@ -177,11 +177,22 @@ export const fetchBidsForLoadViaRestApi = async ({ loadId, timeoutMs = 12000 }) 
     Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
   };
 
-  const bidsRows = await fetchJsonWithTimeout({
-    url: `${SUPABASE_URL}/rest/v1/bids?select=id,load_id,driver_id,price,status,created_at,updated_at&load_id=eq.${loadId}&order=created_at.desc`,
-    headers,
-    timeoutMs,
-  });
+  let bidsRows = null;
+  try {
+    bidsRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/bids?select=id,load_id,driver_id,price,status,created_at,updated_at&load_id=eq.${loadId}&order=created_at.desc`,
+      headers,
+      timeoutMs,
+    });
+  } catch (error) {
+    const message = String(error?.message || "").toLowerCase();
+    if (!message.includes("updated_at")) throw error;
+    bidsRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/bids?select=id,load_id,driver_id,price,status,created_at&load_id=eq.${loadId}&order=created_at.desc`,
+      headers,
+      timeoutMs,
+    });
+  }
   const bids = mapBidsWithOptionalUpdatedAt(Array.isArray(bidsRows) ? bidsRows : []);
   if (!bids.length) return [];
 
