@@ -59,6 +59,7 @@ const empReviews = {
 const getER = name => empReviews[name] || empReviews["default"];
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-02-28", title: "İlan yayınlama sırasında formu kilitleyen temalı bekleme animasyonu eklendi." },
   { date: "2026-02-28", title: "Runtime logları için Supabase runtime_logs kuyruğu ve otomatik flush eklendi." },
   { date: "2026-02-28", title: "Yük listeleme akışına Supabase timeout sonrası REST fallback eklendi." },
   { date: "2026-02-28", title: "Sayaç fallback mantığında eski yüksek değerin kilitlenme bug'ı düzeltildi." },
@@ -2129,7 +2130,30 @@ export default function App() {
 
           {/* ─── EMPLOYER ─── */}
           {screen === "employer" && (
-            <div className="p-5 pb-20">
+            <div className="relative p-5 pb-20">
+              {isPostingLoad && (
+                <div className="absolute inset-0 z-30 rounded-2xl bg-slate-950/88 backdrop-blur-[3px] border border-slate-700/50 flex items-center justify-center p-6">
+                  <div className="w-full max-w-sm rounded-2xl border border-cyan-500/25 bg-slate-900/90 p-5 shadow-2xl">
+                    <div className="text-center mb-4">
+                      <p className="text-cyan-300 font-black text-base tracking-wide">İLAN YAYINLANIYOR</p>
+                      <p className="text-slate-300 text-xs mt-1">Lütfen bekleyin. Alanlar geçici olarak kilitlendi.</p>
+                    </div>
+                    <div className="yc-posting-track">
+                      <div className="yc-posting-track-line" />
+                      <div className="yc-posting-truck" aria-hidden="true">🚚</div>
+                    </div>
+                    <div className="mt-4 flex items-center justify-center gap-2 text-[11px] text-slate-300">
+                      <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+                      <span>Rota ve ilan bilgileri doğrulanıyor...</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <fieldset
+                disabled={isPostingLoad}
+                className={`border-0 m-0 p-0 min-w-0 ${isPostingLoad ? "opacity-60 select-none" : ""}`}
+              >
               <h2 className="text-white text-3xl font-black mb-2 tracking-tight">🏢 Hızlı İlan Ver</h2>
               <p className="text-slate-400 text-sm mb-6">Yük detaylarını girin, binlerce şoföre ulaşın.</p>
 
@@ -2240,6 +2264,7 @@ export default function App() {
                 </div>
 
               </div>
+              </fieldset>
             </div>
           )}
           </div>{/* end page-enter */}

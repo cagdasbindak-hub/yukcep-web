@@ -65,3 +65,61 @@
     0 20px 35px rgba(3, 105, 161, 0.34),
     0 0 0 1px rgba(255, 255, 255, 0.2) inset;
 }
+
+.yc-posting-track {
+  position: relative;
+  height: 58px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(2, 6, 23, 0.95));
+  border: 1px solid rgba(14, 165, 233, 0.32);
+  overflow: hidden;
+}
+
+.yc-posting-track-line {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(56, 189, 248, 0.82) 0 18px,
+      rgba(2, 6, 23, 0.2) 18px 30px
+    );
+  animation: yc-track-flow 1.6s linear infinite;
+}
+
+.yc-posting-truck {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  font-size: 1.2rem;
+  transform: translateY(-50%);
+  animation: yc-truck-run 1.9s ease-in-out infinite;
+  filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.35));
+}
+
+@keyframes yc-truck-run {
+  0% {
+    left: 12px;
+    transform: translateY(-50%) scale(0.97);
+  }
+  50% {
+    transform: translateY(calc(-50% - 2px)) scale(1);
+  }
+  100% {
+    left: calc(100% - 38px);
+    transform: translateY(-50%) scale(0.98);
+  }
+}
+
+@keyframes yc-track-flow {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: -42px 0;
+  }
+}
