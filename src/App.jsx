@@ -878,19 +878,44 @@ export default function App() {
     }
 
     try {
-      // 1. Insert Bid
-      await createBidApi({
-        loadId: selectedLoadDetail.id,
-        driverId: user.id,
-        price,
-      });
+      // 1. Insert Bid (timeout + retry to avoid sticky "Gönderiliyor..." state)
+      try {
+        await withTimeout(
+          createBidApi({
+            loadId: selectedLoadDetail.id,
+            driverId: user.id,
+            price,
+          }),
+          15000,
+          "Teklif gönderme zaman aşımına uğradı (15sn)."
+        );
+      } catch (firstBidError) {
+        appendRuntimeLog("warn", "BID_SUBMIT_RETRY", firstBidError?.message || "Bid timeout, retrying");
+        await withTimeout(
+          createBidApi({
+            loadId: selectedLoadDetail.id,
+            driverId: user.id,
+            price,
+          }),
+          25000,
+          "Teklif gönderme ikinci denemede de zaman aşımına uğradı (25sn)."
+        );
+      }
 
-      // 2. Notify Employer
-      await createNotificationApi({
-        userId: selectedLoadDetail.raw.employer_id,
-        actorId: user.id,
-        message: `Yeni Teklif: ${profile?.full_name || 'Bir şoför'} ilanınıza ${price}₺ teklif verdi.`,
-      });
+      // 2. Notify Employer (non-blocking for bidder UX)
+      try {
+        await withTimeout(
+          createNotificationApi({
+            userId: selectedLoadDetail.raw.employer_id,
+            actorId: user.id,
+            message: `Yeni Teklif: ${profile?.full_name || "Bir şoför"} ilanınıza ${price}₺ teklif verdi.`,
+          }),
+          10000,
+          "Teklif bildirimi zaman aşımına uğradı (10sn)."
+        );
+      } catch (notifyError) {
+        appendRuntimeLog("warn", "BID_NOTIFY_WARN", notifyError?.message || "Notification timeout");
+      }
 
       setHasBid(true);
       appendRuntimeLog("info", "BID_SUBMIT_OK", `load=${selectedLoadDetail.id} price=${price}`);
