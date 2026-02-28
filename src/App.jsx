@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { MessageSquare, MapPin, Truck, RefreshCw, Calendar, Package, ArrowLeft, AlertCircle, CheckCircle, LogOut, User, Bell } from 'lucide-react';
-import { supabase } from './lib/supabase';
+import { supabase, SUPABASE_URL } from './lib/supabase';
 import {
   createBidApi,
   createLoadApi,
@@ -67,6 +67,53 @@ const releaseUpdates = [
   { date: "2026-02-28", title: "Genel hata yakalama ve toast mesajları güçlendirildi." },
 ];
 const LOG_STORAGE_KEY = "yukcep_runtime_logs_v1";
+
+const getSupabaseStorageKey = () => {
+  try {
+    const projectRef = SUPABASE_URL.replace(/^https?:\/\//, "").split(".")[0];
+    return `sb-${projectRef}-auth-token`;
+  } catch {
+    return null;
+  }
+};
+
+const decodeJwtExpiry = (token) => {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const parsed = JSON.parse(atob(normalized));
+    return typeof parsed?.exp === "number" ? parsed.exp : null;
+  } catch {
+    return null;
+  }
+};
+
+const readCachedAccessToken = () => {
+  const key = getSupabaseStorageKey();
+  if (!key) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const candidates = [
+      parsed?.access_token,
+      parsed?.currentSession?.access_token,
+      parsed?.session?.access_token,
+      Array.isArray(parsed) ? parsed?.[0]?.access_token : null,
+      Array.isArray(parsed) ? parsed?.[0]?.currentSession?.access_token : null,
+    ].filter(Boolean);
+
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    const valid = candidates.find((token) => {
+      const exp = decodeJwtExpiry(token);
+      return exp && exp > nowEpoch + 30;
+    });
+    return valid || candidates[0] || null;
+  } catch {
+    return null;
+  }
+};
 
 // ─── SMALL COMPONENTS ───
 const TrailerBadge = ({ type, big }) => {
@@ -697,7 +744,13 @@ export default function App() {
     appendRuntimeLog("info", "POST_LOAD_STARTED", `${empForm.from} -> ${empForm.to} | ${empForm.type}`);
     setIsPostingLoad(true);
     try {
-      let accessToken = null;
+      let accessToken = readCachedAccessToken();
+      if (accessToken) {
+        const exp = decodeJwtExpiry(accessToken);
+        appendRuntimeLog("info", "POST_LOAD_TOKEN_CACHE", `cached_token_exp=${exp || "unknown"}`);
+      } else {
+        appendRuntimeLog("warn", "POST_LOAD_TOKEN_CACHE_EMPTY", "localStorage token bulunamadı.");
+      }
 
       // Session check should never block publishing. If it times out, continue and let DB decide.
       try {
@@ -712,7 +765,7 @@ export default function App() {
         } else if (activeSession.user.id !== user.id) {
           appendRuntimeLog("warn", "POST_LOAD_SESSION_MISMATCH", `session=${activeSession.user.id} ui=${user.id}`);
         } else {
-          accessToken = activeSession.access_token || null;
+          accessToken = activeSession.access_token || accessToken;
           appendRuntimeLog("info", "POST_LOAD_SESSION_OK", `user=${activeSession.user.id}`);
         }
       } catch (sessionCheckError) {
@@ -736,18 +789,30 @@ export default function App() {
         currency: "TRY",
       };
 
-      const publishLoad = async () =>
-        withTimeout(
+      const publishLoad = async (timeoutMs) => {
+        if (accessToken) {
+          return withTimeout(
+            createLoadViaRestApi({ loadData, accessToken, timeoutMs }),
+            timeoutMs + 2000,
+            `REST insert zaman aşımına uğradı (${Math.ceil((timeoutMs + 2000) / 1000)}sn).`
+          );
+        }
+        return withTimeout(
           createLoadApi(loadData),
-          25000,
-          "İlan oluşturma zaman aşımına uğradı (25sn)."
+          timeoutMs,
+          `İlan oluşturma zaman aşımına uğradı (${Math.ceil(timeoutMs / 1000)}sn).`
         );
+      };
+
+      if (!accessToken) {
+        throw new Error("Aktif oturum tokeni alınamadı. Çıkış yapıp tekrar giriş yapın.");
+      }
 
       try {
-        await publishLoad();
+        await publishLoad(18000);
       } catch (firstError) {
         const firstMessage = (firstError?.cause?.message || firstError?.message || "").toLowerCase();
-        const isTimeout = firstMessage.includes("zaman aşımına uğradı");
+        const isTimeout = firstMessage.includes("zaman aşımına uğradı") || firstMessage.includes("timeout");
         const isAuthError =
           firstMessage.includes("jwt") ||
           firstMessage.includes("unauthorized") ||
@@ -781,36 +846,10 @@ export default function App() {
           setProfile(ensuredProfile);
           appendRuntimeLog("info", "POST_LOAD_PROFILE_READY", `role=${ensuredProfile?.role || "unknown"}`);
 
-          await publishLoad();
+          await publishLoad(24000);
         } else if (isTimeout) {
           appendRuntimeLog("warn", "POST_LOAD_RETRY", "İlk deneme timeout, ikinci deneme başlatılıyor.");
-          if (!accessToken) {
-            try {
-              const retrySession = await withTimeout(
-                supabase.auth.getSession(),
-                4000,
-                "Retry session check timeout."
-              );
-              accessToken = retrySession?.data?.session?.access_token || null;
-            } catch {
-              // ignore
-            }
-          }
-
-          if (accessToken) {
-            appendRuntimeLog("info", "POST_LOAD_RETRY_REST", "REST fallback ile insert deneniyor.");
-            await withTimeout(
-              createLoadViaRestApi({ loadData, accessToken, timeoutMs: 30000 }),
-              32000,
-              "REST fallback insert de zaman aşımına uğradı (32sn)."
-            );
-          } else {
-            await withTimeout(
-              createLoadApi(loadData),
-              40000,
-              "İlan oluşturma ikinci denemede de zaman aşımına uğradı (40sn)."
-            );
-          }
+          await publishLoad(30000);
         } else {
           throw firstError;
         }

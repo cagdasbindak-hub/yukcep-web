@@ -200,11 +200,7 @@ export const createLoadApi = async (loadData) => {
   return unwrap(first, "Failed to create load");
 };
 
-export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 20000 }) => {
-  if (!accessToken) {
-    throw new Error("REST insert requires a valid access token.");
-  }
-
+const postLoadViaRest = async ({ payload, accessToken, timeoutMs }) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -218,7 +214,7 @@ export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 
         "Content-Type": "application/json",
         Prefer: "return=representation",
       },
-      body: JSON.stringify(loadData),
+      body: JSON.stringify(payload),
     });
 
     const text = await res.text();
@@ -234,7 +230,9 @@ export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 
         (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
         text ||
         `HTTP ${res.status}`;
-      throw new Error(`REST insert failed: ${message}`);
+      const err = new Error(`REST insert failed: ${message}`);
+      err.status = res.status;
+      throw err;
     }
 
     if (Array.isArray(parsed) && parsed[0]?.id) {
@@ -251,6 +249,33 @@ export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 
     throw error;
   } finally {
     clearTimeout(timeoutId);
+  }
+};
+
+export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 20000 }) => {
+  if (!accessToken) {
+    throw new Error("REST insert requires a valid access token.");
+  }
+
+  try {
+    return await postLoadViaRest({ payload: loadData, accessToken, timeoutMs });
+  } catch (error) {
+    const message = String(error?.message || "").toLowerCase();
+    const fallbackData = { ...loadData };
+    let changed = false;
+
+    ["kdv_included", "status", "currency"].forEach((field) => {
+      if (message.includes(field)) {
+        delete fallbackData[field];
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      return await postLoadViaRest({ payload: fallbackData, accessToken, timeoutMs });
+    }
+
+    throw error;
   }
 };
 
