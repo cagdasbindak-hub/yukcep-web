@@ -5,6 +5,7 @@ import {
   createBidApi,
   createLoadApi,
   createNotificationApi,
+  ensureProfileApi,
   fetchBidsForLoadApi,
   fetchLoadDetailsApi,
   fetchLoadsApi,
@@ -51,6 +52,19 @@ const empReviews = {
   "default": { ratings: { speed: 3.5, payment: 3.5, comm: 3.5 }, reviews: [{ driver: "Şoför", stars: 4, text: "Memnunum.", date: "1h", resp: null }] }
 };
 const getER = name => empReviews[name] || empReviews["default"];
+
+const releaseUpdates = [
+  { date: "2026-02-28", title: "Ana sayfa sayaçları gerçek veriye bağlandı." },
+  { date: "2026-02-28", title: "İlan listesi canlı güncelleme (insert/update/delete) ile senkronlandı." },
+  { date: "2026-02-28", title: "Şehir filtrelerinde Türkçe karakter/case normalizasyonu eklendi." },
+  { date: "2026-02-28", title: "Detaylı Türkiye haritası ve il bazlı nokta gösterimi eklendi." },
+  { date: "2026-02-28", title: "Neredesiniz ekranına 81 il arama + dropdown + harf gruplama eklendi." },
+  { date: "2026-02-28", title: "İlan verdikten sonra liste otomatik yenileme iyileştirildi." },
+  { date: "2026-02-28", title: "Yük detay ekranında teklif akışı iyileştirildi." },
+  { date: "2026-02-28", title: "Bildirimler gerçek zamanlı dinleme ile anlık hale getirildi." },
+  { date: "2026-02-28", title: "UI performansı için kart ve geçiş animasyonları optimize edildi." },
+  { date: "2026-02-28", title: "Genel hata yakalama ve toast mesajları güçlendirildi." },
+];
 
 // ─── SMALL COMPONENTS ───
 const TrailerBadge = ({ type, big }) => {
@@ -135,42 +149,6 @@ const TrustScoreRing = ({ score }) => {
   );
 };
 
-const SimpleBarChart = () => {
-  const data = [
-    { label: 'Pzt', value: 45 },
-    { label: 'Sal', value: 72 },
-    { label: 'Çar', value: 38 },
-    { label: 'Per', value: 95 },
-    { label: 'Cum', value: 60 },
-  ];
-  const max = 100;
-
-  return (
-    <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/50 mb-6 glass-card">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-white font-bold text-sm">📊 İlan Görüntülenme</h3>
-        <span className="text-xs text-emerald-400 font-bold bg-emerald-500/10 px-2 py-1 rounded-lg">+12%</span>
-      </div>
-      <div className="flex items-end justify-between h-24 gap-2">
-        {data.map((d, i) => (
-          <div key={i} className="flex flex-col items-center gap-1 flex-1 group">
-            <div className="w-full bg-slate-700/30 rounded-t-lg relative overflow-hidden group-hover:bg-slate-700/50 transition-all duration-300" style={{ height: '100%' }}>
-               <div 
-                 className="absolute inset-x-0 bottom-0 rounded-t-lg transition-all duration-1000 ease-out group-hover:brightness-110" 
-                 style={{ 
-                   height: `${(d.value / max) * 100}%`,
-                   background: 'linear-gradient(to top, #3b82f6, #60a5fa)' 
-                 }} 
-               />
-            </div>
-            <span className="text-[10px] text-slate-500 font-bold">{d.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-};
-
 // ─── MAIN APP ───
 export default function App() {
   const [screen, setScreen] = useState("welcome");
@@ -212,6 +190,7 @@ export default function App() {
   const [hasBid, setHasBid] = useState(false);
   const [loadBids, setLoadBids] = useState([]);
   const [isProcessingBid, setIsProcessingBid] = useState(false);
+  const [isPostingLoad, setIsPostingLoad] = useState(false);
 
   const fetchNotifications = useCallback(async () => {
     if (!user) return;
@@ -605,14 +584,28 @@ export default function App() {
   };
 
   const handlePostLoad = async () => {
-    if (validateForm()) {
-      if (!user) {
-        showToast("İlan vermek için giriş yapmalısınız.", "error");
-        nav("auth");
-        return;
-      }
+    if (!validateForm()) {
+      showToast("⚠️ Lütfen eksik alanları doldurun.", "error");
+      return;
+    }
 
-      // Basic formatting
+    if (!user) {
+      showToast("İlan vermek için giriş yapmalısınız.", "error");
+      nav("auth");
+      return;
+    }
+
+    setIsPostingLoad(true);
+    try {
+      const ensuredProfile = await ensureProfileApi({
+        userId: user.id,
+        email: user.email,
+        fullName: profile?.full_name || user.user_metadata?.full_name,
+        phone: profile?.phone,
+        role: profile?.role || "employer",
+      });
+      setProfile(ensuredProfile);
+
       const loadData = {
         origin_city: empForm.from,
         destination_city: empForm.to,
@@ -620,29 +613,34 @@ export default function App() {
         trailer_type: empForm.trailer,
         price: parseFloat(empForm.price) || 0,
         kdv_included: empForm.kdv,
-        weight_kg: 10000, // Placeholder or add input
-        is_urgent: false, // Placeholder or add input
+        weight_kg: 10000,
+        is_urgent: false,
         is_fleet: empForm.fleet,
         truck_count: empForm.fleet ? Number(empForm.trucks) || 1 : 1,
-        pickup_date: new Date().toISOString().split('T')[0], // Today
+        pickup_date: new Date().toISOString().split('T')[0],
         employer_id: user.id,
+        status: "open",
+        currency: "TRY",
       };
 
-      // Try insert
-      try {
-        await createLoadApi(loadData);
-        showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
-        setShowConfetti(true);
-        setTimeout(() => setShowConfetti(false), 100);
-        setEmpForm({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
-        setFormErrors({});
-        await Promise.all([fetchLoads(), fetchPublicStats()]);
-      } catch (error) {
-        console.error("Insert error:", error);
-        showToast(`❌ Hata: ${error.message}`, "error");
-      }
-    } else {
-      showToast("⚠️ Lütfen eksik alanları doldurun.", "error");
+      await createLoadApi(loadData);
+      showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
+      setShowConfetti(true);
+      setTimeout(() => setShowConfetti(false), 100);
+      setEmpForm({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
+      setFormErrors({});
+      await Promise.all([fetchLoads(), fetchPublicStats()]);
+      setFilterFrom(loadData.origin_city);
+      setFilterTo("");
+      setFilterTrailer("");
+      setCity(loadData.origin_city);
+      nav("map");
+    } catch (error) {
+      console.error("Insert error:", error);
+      const backendMessage = error?.cause?.message || error?.message || "İlan eklenemedi.";
+      showToast(`❌ Hata: ${backendMessage}`, "error");
+    } finally {
+      setIsPostingLoad(false);
     }
   };
 
@@ -713,7 +711,7 @@ export default function App() {
           {screen === "welcome" && (
             <div className="flex flex-col min-h-full">
               {/* ─── COMPACT TOP NAV BAR ─── */}
-              <div className="topbar-grad flex items-center justify-between px-5 py-4 backdrop-blur-sm border-b border-slate-700/50">
+              <div className="topbar-grad relative z-40 flex items-center justify-between px-5 py-4 backdrop-blur-sm border-b border-slate-700/50">
                 <div className="flex items-center gap-2.5">
                   <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}>
                     <span className="text-2xl">🚚</span>
@@ -739,7 +737,7 @@ export default function App() {
                       </button>
 
                       {showNotifications && (
-                        <div className="absolute right-0 top-12 w-80 rounded-2xl bg-slate-800 border border-slate-700 shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
+                        <div className="absolute right-0 top-12 w-80 rounded-2xl bg-slate-800 border border-slate-700 shadow-2xl z-[90] overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
                           <div className="p-3 border-b border-slate-700/50 flex justify-between items-center bg-slate-900/50">
                             <span className="text-white font-bold text-sm">Bildirimler</span>
                             {unreadCount > 0 && <span className="text-xs text-blue-400 font-bold">{unreadCount} yeni</span>}
@@ -777,7 +775,7 @@ export default function App() {
                       </button>
                       {/* Profile Card Dropdown */}
                       {showProfileCard && (
-                        <div className="absolute right-0 top-12 w-72 rounded-3xl bg-slate-900/90 backdrop-blur-xl border border-slate-700/50 shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 ring-1 ring-white/10">
+                        <div className="absolute right-0 top-12 w-72 rounded-3xl bg-slate-900/90 backdrop-blur-xl border border-slate-700/50 shadow-2xl z-[90] overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 ring-1 ring-white/10">
                           <div className="p-5 bg-gradient-to-br from-blue-600/20 to-cyan-500/20 border-b border-slate-700/50 relative overflow-hidden">
                             <div className="absolute inset-0 bg-white/5 opacity-50 blur-3xl -z-10" />
                             <div className="flex items-center gap-4">
@@ -879,9 +877,20 @@ export default function App() {
                 {/* ─── SPACER ─── */}
                 <div className="flex-1" />
 
-                {/* ─── FOOTER BRANDING ─── */}
-                <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/30 text-center">
-                  <p className="text-slate-500 text-xs leading-relaxed">🛡️ <span className="text-slate-300 font-bold">YükCep Güvencesi</span> · Komisyonsuz, aracısız nakliye pazarı</p>
+                {/* ─── RELEASE LOG ─── */}
+                <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/30">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-slate-200 text-sm font-black">🧾 Son 10 Güncelleme</p>
+                    <span className="text-[10px] text-slate-500 font-bold">LIVE LOG</span>
+                  </div>
+                  <div className="max-h-44 overflow-y-auto pr-1 space-y-2">
+                    {releaseUpdates.map((item, idx) => (
+                      <div key={`${item.date}-${idx}`} className="p-2 rounded-lg bg-slate-900/40 border border-slate-700/30">
+                        <p className="text-slate-100 text-xs font-bold leading-snug">{item.title}</p>
+                        <p className="text-slate-500 text-[10px] mt-1">{item.date}</p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1463,11 +1472,9 @@ export default function App() {
               <h2 className="text-white text-3xl font-black mb-2 tracking-tight">🏢 Hızlı İlan Ver</h2>
               <p className="text-slate-400 text-sm mb-6">Yük detaylarını girin, binlerce şoföre ulaşın.</p>
 
-              {/* Dashboard Chart */}
-              <SimpleBarChart />
-
               {/* Fleet Toggle - Improved */}
               <button
+                type="button"
                 onClick={() => setEmpForm(p => ({ ...p, fleet: !p.fleet }))}
                 className={`w-full p-4 rounded-2xl mb-6 border-2 flex items-center gap-4 transition-all active:scale-[0.98] ${empForm.fleet ? "border-amber-500 bg-amber-500/10 shadow-amber-500/10 shadow-lg" : "border-slate-700 bg-slate-800/50"}`}
               >
@@ -1528,7 +1535,7 @@ export default function App() {
                   <label className="text-slate-400 text-xs font-bold mb-1.5 block ml-1 uppercase">🚛 Dorse Tipi</label>
                   <div className="grid grid-cols-3 gap-2">
                     {dorseTypes.map(d => (
-                      <button key={d.k} onClick={() => setEmpForm(p => ({ ...p, trailer: d.k }))} className={`py-3 rounded-xl text-center font-bold text-xs transition-all active:scale-95 ${empForm.trailer === d.k ? "text-white border-2 scale-105 shadow-lg" : "text-slate-400 bg-slate-800 border border-slate-700 opacity-70"}`} style={empForm.trailer === d.k ? { background: d.color + "25", borderColor: d.color } : {}}>
+                      <button type="button" key={d.k} onClick={() => setEmpForm(p => ({ ...p, trailer: d.k }))} className={`py-3 rounded-xl text-center font-bold text-xs transition-all active:scale-95 ${empForm.trailer === d.k ? "text-white border-2 scale-105 shadow-lg" : "text-slate-400 bg-slate-800 border border-slate-700 opacity-70"}`} style={empForm.trailer === d.k ? { background: d.color + "25", borderColor: d.color } : {}}>
                         <span className="text-xl block mb-1">{d.icon}</span>{d.k}
                       </button>
                     ))}
@@ -1545,7 +1552,7 @@ export default function App() {
                       onChange={e => { setEmpForm(p => ({ ...p, price: e.target.value })); if (formErrors.price) setFormErrors(p => ({ ...p, price: null })); }}
                       className={`flex-1 py-4 px-4 rounded-xl bg-slate-800 border text-white text-lg font-black placeholder-slate-600 focus:ring-2 focus:ring-blue-500 outline-none transition-all ${formErrors.price ? "border-red-500 ring-1 ring-red-500" : "border-slate-700"}`}
                     />
-                    <button onClick={() => setEmpForm(p => ({ ...p, kdv: !p.kdv }))} className={`h-[58px] px-4 rounded-xl font-bold text-sm transition-all whitespace-nowrap active:scale-95 border-2 ${empForm.kdv ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-400" : "bg-red-500/10 border-red-500/30 text-red-400 opacity-60"}`}>
+                    <button type="button" onClick={() => setEmpForm(p => ({ ...p, kdv: !p.kdv }))} className={`h-[58px] px-4 rounded-xl font-bold text-sm transition-all whitespace-nowrap active:scale-95 border-2 ${empForm.kdv ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-400" : "bg-red-500/10 border-red-500/30 text-red-400 opacity-60"}`}>
                       {empForm.kdv ? "+KDV" : "KDV Yok"}
                     </button>
                   </div>
@@ -1554,12 +1561,14 @@ export default function App() {
 
                 <div className="pt-2">
                   <button
+                    type="button"
                     onClick={handlePostLoad}
-                    className="w-full py-5 rounded-2xl text-white font-black text-xl active:scale-[0.98] transition-all relative overflow-hidden shadow-xl"
+                    disabled={isPostingLoad}
+                    className={`w-full py-5 rounded-2xl text-white font-black text-xl active:scale-[0.98] transition-all relative overflow-hidden shadow-xl ${isPostingLoad ? "opacity-70 cursor-not-allowed" : ""}`}
                     style={{ background: empForm.fleet ? "linear-gradient(180deg,#fbbf24,#d97706)" : "linear-gradient(180deg,#fb923c,#ea580c)" }}
                   >
                     <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/20 to-transparent" />
-                    <span className="relative drop-shadow-sm">{empForm.fleet ? "FİLO İLANI YAYINLA" : "📢 İLANI YAYINLA"}</span>
+                    <span className="relative drop-shadow-sm">{isPostingLoad ? "YAYINLANIYOR..." : (empForm.fleet ? "FİLO İLANI YAYINLA" : "📢 İLANI YAYINLA")}</span>
                   </button>
                 </div>
 
@@ -1599,10 +1608,6 @@ export default function App() {
         )}
 
         {/* SUPPORT FAB - Always Visible */}
-        <div className="absolute bottom-5 left-5 z-30 px-3 py-2 rounded-xl bg-slate-900/85 border border-cyan-500/40 text-cyan-300 text-xs font-bold shadow-lg backdrop-blur-md">
-          Tamam simdi bu is Codex in ellerinde
-        </div>
-
         <button onClick={() => setChatOpen(!chatOpen)} className="floating-fab absolute bottom-5 right-5 w-14 h-14 rounded-full flex items-center justify-center z-40 active:scale-90 transition-all shadow-lg hover:shadow-blue-500/40" style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}>
           <span className="text-2xl drop-shadow-md">{chatOpen ? "✕" : <MessageSquare size={26} className="fill-white/20" />}</span>
           {!chatOpen && <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center border-2 border-slate-900 animate-bounce">1</span>}

@@ -19,6 +19,25 @@ const normalizeCityKey = (value = "") =>
     .replace(/ı/g, "i")
     .replace(/[^a-z0-9]/g, "");
 
+const normalizeTextKey = (value = "") =>
+  value
+    .toString()
+    .trim()
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+const isActiveLoadStatus = (status) => {
+  const key = normalizeTextKey(status);
+  if (!key) return true;
+  return !["completed", "cancelled", "canceled", "closed", "archived"].includes(key);
+};
+
+const isDriverRole = (role) => {
+  const key = normalizeTextKey(role).replace(/[^a-z0-9]/g, "");
+  return ["driver", "sofor", "surucu"].includes(key);
+};
+
 export const fetchProfileById = async (userId) => {
   const res = await supabase.from("profiles").select("*").eq("id", userId).single();
   return unwrap(res, "Failed to fetch profile");
@@ -161,10 +180,19 @@ export const createLoadApi = async (loadData) => {
     return first.data;
   }
 
-  const message = first.error?.message || "";
-  if (message.includes("kdv_included")) {
-    const fallbackData = { ...loadData };
-    delete fallbackData.kdv_included;
+  const message = (first.error?.message || "").toLowerCase();
+  const fallbackData = { ...loadData };
+  let changed = false;
+
+  // Backward compatibility for older schemas.
+  ["kdv_included", "status", "currency"].forEach((field) => {
+    if (message.includes(field)) {
+      delete fallbackData[field];
+      changed = true;
+    }
+  });
+
+  if (changed) {
     const retry = await supabase.from("loads").insert([fallbackData]).select("id").single();
     return unwrap(retry, "Failed to create load");
   }
@@ -173,34 +201,59 @@ export const createLoadApi = async (loadData) => {
 };
 
 export const fetchPublicStatsApi = async () => {
-  const [loadsRes, driversRes, cityRowsRes] = await Promise.all([
-    supabase.from("loads").select("id", { count: "exact", head: true }).eq("status", "open"),
-    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "driver"),
-    supabase.from("loads").select("origin_city, destination_city").eq("status", "open"),
+  const [loadsRes, driversRes] = await Promise.all([
+    supabase.from("loads").select("id, status, origin_city, destination_city"),
+    supabase.from("profiles").select("id, role"),
   ]);
 
-  if (loadsRes.error) {
-    const err = new Error(`Failed to fetch active load count: ${loadsRes.error.message}`);
-    err.cause = loadsRes.error;
-    throw err;
-  }
+  const loads = unwrap(loadsRes, "Failed to fetch public load stats");
+  const activeLoads = loads.filter((row) => isActiveLoadStatus(row.status));
 
-  if (driversRes.error) {
-    const err = new Error(`Failed to fetch driver count: ${driversRes.error.message}`);
-    err.cause = driversRes.error;
-    throw err;
-  }
-
-  const cityRows = unwrap(cityRowsRes, "Failed to fetch city stats");
   const citySet = new Set();
-  cityRows.forEach((row) => {
+  activeLoads.forEach((row) => {
     if (row.origin_city) citySet.add(String(row.origin_city).trim());
     if (row.destination_city) citySet.add(String(row.destination_city).trim());
   });
 
+  let activeDrivers = 0;
+  if (!driversRes.error && Array.isArray(driversRes.data)) {
+    activeDrivers = driversRes.data.filter((row) => isDriverRole(row.role)).length;
+  }
+
   return {
-    activeLoads: loadsRes.count ?? 0,
-    activeDrivers: driversRes.count ?? 0,
+    activeLoads: activeLoads.length,
+    activeDrivers,
     activeCities: citySet.size,
   };
+};
+
+export const ensureProfileApi = async ({ userId, email, fullName, phone, role }) => {
+  const existing = await supabase
+    .from("profiles")
+    .select("*")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (existing.error) {
+    const err = new Error(`Failed to verify profile: ${existing.error.message}`);
+    err.cause = existing.error;
+    throw err;
+  }
+
+  if (existing.data) {
+    return existing.data;
+  }
+
+  const fallbackEmail = String(email || `${userId}@yukcep.local`).trim();
+  const roleKey = isDriverRole(role) ? "driver" : "employer";
+  const payload = {
+    id: userId,
+    email: fallbackEmail,
+    full_name: String(fullName || "YukCep Kullanici").trim(),
+    phone: phone ? String(phone).trim() : null,
+    role: roleKey,
+  };
+
+  const created = await supabase.from("profiles").insert([payload]).select("*").single();
+  return unwrap(created, "Failed to create missing profile");
 };
