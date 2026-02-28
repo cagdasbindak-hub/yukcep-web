@@ -662,18 +662,6 @@ export default function App() {
     }
   }, [user, fetchNotifications]);
 
-  useEffect(() => {
-    if (!user || notifications.length === 0) return;
-    const latestMessage = String(notifications[0]?.message || "").toLocaleLowerCase("tr-TR");
-    if (screen === "driverFeed" && /(kabul edildi|reddedildi|başka teklif kabul edildi)/i.test(latestMessage)) {
-      loadDriverFeed();
-      return;
-    }
-    if (screen === "employerFeed" && /yeni teklif/i.test(latestMessage)) {
-      loadEmployerFeed();
-    }
-  }, [loadDriverFeed, loadEmployerFeed, notifications, screen, user]);
-
   const markNotificationRead = async (id) => {
     const wasUnread = notifications.find((n) => n.id === id)?.is_read === false;
     const previousNotifications = notifications;
@@ -782,6 +770,18 @@ export default function App() {
       setIsFeedLoading(false);
     }
   }, [appendRuntimeLog, user, withTimeout]);
+
+  useEffect(() => {
+    if (!user || notifications.length === 0) return;
+    const latestMessage = String(notifications[0]?.message || "").toLocaleLowerCase("tr-TR");
+    if (screen === "driverFeed" && /(kabul edildi|reddedildi|başka teklif kabul edildi)/i.test(latestMessage)) {
+      loadDriverFeed();
+      return;
+    }
+    if (screen === "employerFeed" && /yeni teklif/i.test(latestMessage)) {
+      loadEmployerFeed();
+    }
+  }, [loadDriverFeed, loadEmployerFeed, notifications, screen, user]);
 
   const handleLoadClick = async (loadId) => {
     // 1. Find basic load info from local state for immediate feedback
