@@ -891,15 +891,44 @@ export default function App() {
         );
       } catch (firstBidError) {
         appendRuntimeLog("warn", "BID_SUBMIT_RETRY", firstBidError?.message || "Bid timeout, retrying");
-        await withTimeout(
-          createBidApi({
-            loadId: selectedLoadDetail.id,
-            driverId: user.id,
-            price,
-          }),
-          25000,
-          "Teklif gönderme ikinci denemede de zaman aşımına uğradı (25sn)."
-        );
+        try {
+          await withTimeout(
+            createBidApi({
+              loadId: selectedLoadDetail.id,
+              driverId: user.id,
+              price,
+            }),
+            25000,
+            "Teklif gönderme ikinci denemede de zaman aşımına uğradı (25sn)."
+          );
+        } catch (secondBidError) {
+          const message = String(secondBidError?.message || "").toLocaleLowerCase("tr-TR");
+          const isDuplicate =
+            message.includes("duplicate key") ||
+            message.includes("unique constraint") ||
+            message.includes("already") ||
+            message.includes("zaten");
+          let existingBid = null;
+          try {
+            existingBid = await withTimeout(
+              fetchMyBidForLoadApi(selectedLoadDetail.id, user.id),
+              12000,
+              "Teklif doğrulama zaman aşımına uğradı (12sn)."
+            );
+          } catch (verifyError) {
+            appendRuntimeLog("warn", "BID_VERIFY_WARN", verifyError?.message || "Bid verify failed");
+          }
+
+          if (isDuplicate || existingBid) {
+            appendRuntimeLog(
+              "warn",
+              "BID_SUBMIT_RECOVERED",
+              isDuplicate ? "Retry duplicate'a dustu, mevcut teklif kullanildi." : "Timeout sonrasi mevcut teklif bulundu."
+            );
+          } else {
+            throw secondBidError;
+          }
+        }
       }
 
       // 2. Notify Employer (non-blocking for bidder UX)
