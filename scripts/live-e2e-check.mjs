@@ -263,6 +263,21 @@ const writeReport = (status, extra = {}) => {
   return filePath;
 };
 
+const readRuntimeLogs = async (page) => {
+  try {
+    const raw = await page.evaluate(() => localStorage.getItem("yukcep_runtime_logs_v1"));
+    const parsed = JSON.parse(raw || "[]");
+    if (!Array.isArray(parsed)) return [];
+    const bidLogs = parsed.filter((row) => String(row?.event || "").startsWith("BID_"));
+    return {
+      latest: parsed.slice(0, 30),
+      bidOnly: bidLogs.slice(0, 30),
+    };
+  } catch {
+    return { latest: [], bidOnly: [] };
+  }
+};
+
 const launch = async () => {
   const edgePathCandidates = [
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
@@ -281,6 +296,35 @@ const main = async () => {
   const driverContext = await browser.newContext({ locale: "tr-TR", timezoneId: "Europe/Istanbul" });
   const employerPage = await employerContext.newPage();
   const driverPage = await driverContext.newPage();
+  const networkProbe = [];
+
+  const watchNetwork = (page, who) => {
+    page.on("response", async (res) => {
+      const url = res.url();
+      if (!/\/rest\/v1\/(bids|notifications|loads|profiles)/i.test(url)) return;
+      networkProbe.push({
+        at: new Date().toISOString(),
+        who,
+        kind: "response",
+        status: res.status(),
+        url,
+      });
+    });
+    page.on("requestfailed", (req) => {
+      const url = req.url();
+      if (!/\/rest\/v1\/(bids|notifications|loads|profiles)/i.test(url)) return;
+      networkProbe.push({
+        at: new Date().toISOString(),
+        who,
+        kind: "requestfailed",
+        error: req.failure()?.errorText || "unknown",
+        url,
+      });
+    });
+  };
+
+  watchNetwork(employerPage, "employer");
+  watchNetwork(driverPage, "driver");
 
   try {
     await runCheckpoint("S1", "İşveren kullanıcı kaydı ve oturum açma", async () => {
@@ -331,10 +375,18 @@ const main = async () => {
     const message = error instanceof Error ? error.message : String(error);
     const employerShot = path.join(outputDir, `${runId}-employer-fail.png`);
     const driverShot = path.join(outputDir, `${runId}-driver-fail.png`);
+    await employerPage.waitForTimeout(1200).catch(() => {});
+    const employerLogs = await readRuntimeLogs(employerPage);
+    const driverLogs = await readRuntimeLogs(driverPage);
     await employerPage.screenshot({ path: employerShot, fullPage: true }).catch(() => {});
     await driverPage.screenshot({ path: driverShot, fullPage: true }).catch(() => {});
     const report = writeReport("FAIL", {
       error: message,
+      runtimeLogs: {
+        employer: employerLogs,
+        driver: driverLogs,
+      },
+      networkProbe: networkProbe.slice(-120),
       screenshots: {
         employer: employerShot,
         driver: driverShot,

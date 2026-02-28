@@ -546,6 +546,78 @@ export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 
   }
 };
 
+const postBidViaRest = async ({ payload, accessToken, timeoutMs }) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/bids`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await res.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+
+    if (!res.ok) {
+      const message =
+        (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
+        text ||
+        `HTTP ${res.status}`;
+      const err = new Error(`REST bid insert failed: ${message}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    if (Array.isArray(parsed) && parsed[0]) return parsed[0];
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`REST bid insert timeout after ${timeoutMs / 1000}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+export const createBidViaRestApi = async ({ loadId, driverId, price, accessToken, timeoutMs = 15000 }) => {
+  if (!accessToken) {
+    throw new Error("REST bid insert requires a valid access token.");
+  }
+
+  const payload = {
+    load_id: loadId,
+    driver_id: driverId,
+    price,
+    status: "PENDING",
+    updated_at: new Date().toISOString(),
+  };
+
+  try {
+    return await postBidViaRest({ payload, accessToken, timeoutMs });
+  } catch (error) {
+    const message = String(error?.message || "").toLowerCase();
+    if (message.includes("updated_at")) {
+      const { updated_at, ...fallbackPayload } = payload;
+      return await postBidViaRest({ payload: fallbackPayload, accessToken, timeoutMs });
+    }
+    throw error;
+  }
+};
+
 export const fetchPublicStatsApi = async () => {
   const [loadsRes, driversRes] = await Promise.all([
     supabase.from("loads").select("id, status, origin_city, destination_city"),

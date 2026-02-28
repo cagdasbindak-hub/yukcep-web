@@ -3,6 +3,7 @@ import { MessageSquare, MapPin, Truck, RefreshCw, Calendar, Package, ArrowLeft, 
 import { supabase, SUPABASE_URL } from './lib/supabase';
 import {
   createBidApi,
+  createBidViaRestApi,
   createLoadApi,
   createLoadViaRestApi,
   createNotificationApi,
@@ -878,29 +879,35 @@ export default function App() {
     }
 
     try {
-      // 1. Insert Bid (timeout + retry to avoid sticky "Gönderiliyor..." state)
-      try {
-        await withTimeout(
+      const accessToken = readCachedAccessToken();
+      const createBidWithBestRoute = async (timeoutMs) => {
+        if (accessToken) {
+          return createBidViaRestApi({
+            loadId: selectedLoadDetail.id,
+            driverId: user.id,
+            price,
+            accessToken,
+            timeoutMs: Math.max(5000, timeoutMs - 1000),
+          });
+        }
+        return withTimeout(
           createBidApi({
             loadId: selectedLoadDetail.id,
             driverId: user.id,
             price,
           }),
-          15000,
-          "Teklif gönderme zaman aşımına uğradı (15sn)."
+          timeoutMs,
+          `Teklif gönderme zaman aşımına uğradı (${Math.ceil(timeoutMs / 1000)}sn).`
         );
+      };
+
+      // 1. Insert Bid (timeout + retry to avoid sticky "Gönderiliyor..." state)
+      try {
+        await createBidWithBestRoute(15000);
       } catch (firstBidError) {
         appendRuntimeLog("warn", "BID_SUBMIT_RETRY", firstBidError?.message || "Bid timeout, retrying");
         try {
-          await withTimeout(
-            createBidApi({
-              loadId: selectedLoadDetail.id,
-              driverId: user.id,
-              price,
-            }),
-            25000,
-            "Teklif gönderme ikinci denemede de zaman aşımına uğradı (25sn)."
-          );
+          await createBidWithBestRoute(25000);
         } catch (secondBidError) {
           const message = String(secondBidError?.message || "").toLocaleLowerCase("tr-TR");
           const isDuplicate =
