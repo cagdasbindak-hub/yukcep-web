@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { MessageSquare, MapPin, Truck, RefreshCw, Calendar, Package, ArrowLeft, AlertCircle, CheckCircle, LogOut, User, Bell } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import {
@@ -20,10 +20,11 @@ import SplashScreen from './components/SplashScreen';
 import Confetti from './components/Confetti';
 import TurkeyHeatmap from './components/TurkeyHeatmap';
 import SkeletonLoadCard from './components/SkeletonLoadCard';
+import { TURKEY_CITY_NAMES, normalizeCityKey } from './lib/turkeyGeoData';
 import './App.css';
 
 // ─── DATA ───
-const cities = ["İstanbul", "Ankara", "İzmir", "Bursa", "Antalya", "Adana", "Konya", "Gaziantep", "Mersin", "Kayseri", "Trabzon", "Samsun"];
+const cities = [...TURKEY_CITY_NAMES].sort((a, b) => a.localeCompare(b, "tr-TR"));
 const dorseTypes = [{ k: "Kapalı", icon: "📦", color: "#3b82f6" }, { k: "Açık", icon: "🚛", color: "#f59e0b" }, { k: "Frigorifik", icon: "❄️", color: "#06b6d4" }];
 const fmt = n => n.toLocaleString("tr-TR");
 
@@ -184,6 +185,7 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState([{ from: "bot", text: "Merhaba! YükCep destek hattına hoş geldiniz. Size nasıl yardımcı olabilirim?" }]);
   const [empForm, setEmpForm] = useState({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
   const [formErrors, setFormErrors] = useState({});
+  const [locationQuery, setLocationQuery] = useState("");
   const chatEndRef = useRef(null);
 
   // Splash & effects
@@ -300,6 +302,13 @@ export default function App() {
     setDetailTab("detail");
     setScreenKey(k => k + 1); // trigger page transition
   }, [screen]);
+
+  const handleLocationSelect = useCallback((selectedCity) => {
+    if (!selectedCity) return;
+    setCity(selectedCity);
+    setLocationQuery("");
+    nav("map");
+  }, [nav]);
 
   const handleLoadClick = async (loadId) => {
     // 1. Find basic load info from local state for immediate feedback
@@ -494,6 +503,26 @@ export default function App() {
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
   const [filterTrailer, setFilterTrailer] = useState("");
+
+  const filteredLocationCities = useMemo(() => {
+    const normalized = normalizeCityKey(locationQuery);
+    if (!normalized) return cities;
+    return cities.filter((cityName) =>
+      normalizeCityKey(cityName).includes(normalized)
+    );
+  }, [locationQuery]);
+
+  const groupedLocationCities = useMemo(() => {
+    const groups = {};
+    filteredLocationCities.forEach((cityName) => {
+      const letter = cityName[0].toLocaleUpperCase("tr-TR");
+      if (!groups[letter]) groups[letter] = [];
+      groups[letter].push(cityName);
+    });
+    return Object.entries(groups).sort((a, b) =>
+      a[0].localeCompare(b[0], "tr-TR")
+    );
+  }, [filteredLocationCities]);
 
   const handleClearFilters = () => {
     setFilterFrom("");
@@ -824,12 +853,49 @@ export default function App() {
           {screen === "location" && (
             <div className="p-5 pb-20">
               <h2 className="text-white text-3xl font-black mb-2 tracking-tight">📍 Neredesiniz?</h2>
-              <p className="text-slate-400 text-base mb-6">Size en yakın yükleri bulmak için konum seçin.</p>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {cities.map(c => (
-                  <button key={c} onClick={() => { setCity(c); nav("map"); }} className="py-5 px-3 rounded-2xl bg-slate-800 border border-slate-700/50 text-white font-bold text-lg hover:bg-blue-600 hover:border-blue-500 transition-all active:scale-95 shadow-lg">
-                    {c}
-                  </button>
+              <p className="text-slate-400 text-base mb-4">81 il arasından arayarak veya dropdown ile şehir seçin.</p>
+
+              <div className="space-y-3 mb-4">
+                <input
+                  type="text"
+                  value={locationQuery}
+                  onChange={(e) => setLocationQuery(e.target.value)}
+                  placeholder="Sehir ara... (Ornek: Istanbul, Erzurum)"
+                  className="w-full py-3 px-4 rounded-xl bg-slate-900 border border-slate-700 text-white font-semibold placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                />
+                <select
+                  value=""
+                  onChange={(e) => handleLocationSelect(e.target.value)}
+                  className="w-full py-3 px-4 rounded-xl bg-slate-900 border border-slate-700 text-white font-semibold focus:outline-none focus:border-blue-500"
+                >
+                  <option value="">Dropdown ile il secin...</option>
+                  {cities.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="max-h-[440px] overflow-y-auto pr-1 space-y-4">
+                {groupedLocationCities.length === 0 && (
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/70 p-4 text-slate-400 text-sm font-semibold">
+                    Sonuc bulunamadi.
+                  </div>
+                )}
+                {groupedLocationCities.map(([letter, groupCities]) => (
+                  <div key={letter}>
+                    <p className="text-xs font-black text-slate-500 mb-2 tracking-[0.15em]">{letter}</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                      {groupCities.map((c) => (
+                        <button
+                          key={c}
+                          onClick={() => handleLocationSelect(c)}
+                          className="py-3 px-3 rounded-xl bg-slate-800 border border-slate-700/50 text-white font-bold text-sm hover:bg-blue-600 hover:border-blue-500 transition-all active:scale-95 shadow-lg"
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
