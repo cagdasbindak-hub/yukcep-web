@@ -171,10 +171,10 @@ export const fetchBidsForLoadApi = async (loadId) => {
   return unwrap(res, "Failed to fetch bids");
 };
 
-export const fetchBidsForLoadViaRestApi = async ({ loadId, timeoutMs = 12000 }) => {
+export const fetchBidsForLoadViaRestApi = async ({ loadId, accessToken, timeoutMs = 12000 }) => {
   const headers = {
     apikey: SUPABASE_ANON_KEY,
-    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
   };
 
   let bidsRows = null;
@@ -956,4 +956,15 @@ export const ensureProfileApi = async ({ userId, email, fullName, phone, role })
 
   const created = await supabase.from("profiles").insert([payload]).select("*").single();
   return unwrap(created, "Failed to create missing profile");
+};
+
+export const updateProfileRoleApi = async ({ userId, role }) => {
+  const roleKey = isDriverRole(role) ? "driver" : "employer";
+  const res = await supabase
+    .from("profiles")
+    .update({ role: roleKey })
+    .eq("id", userId)
+    .select("*")
+    .single();
+  return unwrap(res, "Failed to update profile role");
 };

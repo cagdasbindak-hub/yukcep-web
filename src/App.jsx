@@ -7,7 +7,6 @@ import {
   createLoadApi,
   createLoadViaRestApi,
   createNotificationApi,
-  createNotificationViaRestApi,
   ensureProfileApi,
   fetchDriverFeedApi,
   fetchBidsForLoadApi,
@@ -24,6 +23,7 @@ import {
   fetchProfileById,
   insertRuntimeLogsApi,
   markNotificationReadApi,
+  updateProfileRoleApi,
   updateLoadStatusApi,
   updateBidStatusApi,
 } from './lib/api';
@@ -295,6 +295,7 @@ export default function App() {
   const [profile, setProfile] = useState(null);
   const [showProfileCard, setShowProfileCard] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [isUpdatingRole, setIsUpdatingRole] = useState(false);
   const [selectedLoadDetail, setSelectedLoadDetail] = useState(null);
   const [driverFeedItems, setDriverFeedItems] = useState([]);
   const [employerFeedItems, setEmployerFeedItems] = useState([]);
@@ -688,6 +689,7 @@ export default function App() {
   const fetchBidsForLoad = async (loadId) => {
     if (!loadId) return;
     try {
+      const accessToken = readCachedAccessToken();
       let data = null;
       try {
         data = await withTimeout(
@@ -698,7 +700,7 @@ export default function App() {
       } catch (primaryError) {
         appendRuntimeLog("warn", "BIDS_SUPABASE_FAIL", primaryError?.message || "Bids supabase failed");
         data = await withTimeout(
-          fetchBidsForLoadViaRestApi({ loadId, timeoutMs: 12000 }),
+          fetchBidsForLoadViaRestApi({ loadId, accessToken, timeoutMs: 12000 }),
           13000,
           "Teklif listesi fallback zaman aşımına uğradı (13sn)."
         );
@@ -962,25 +964,15 @@ export default function App() {
       try {
         const bidIdTag = createdBid?.id ? `[BID:${createdBid.id}] ` : "";
         const notifyMessage = `Yeni Teklif ${bidIdTag}${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ${price}₺`;
-        if (accessToken) {
-          await createNotificationViaRestApi({
+        await withTimeout(
+          createNotificationApi({
             userId: selectedLoadDetail.raw.employer_id,
             actorId: user.id,
             message: notifyMessage,
-            accessToken,
-            timeoutMs: 9000,
-          });
-        } else {
-          await withTimeout(
-            createNotificationApi({
-              userId: selectedLoadDetail.raw.employer_id,
-              actorId: user.id,
-              message: notifyMessage,
-            }),
-            10000,
-            "Teklif bildirimi zaman aşımına uğradı (10sn)."
-          );
-        }
+          }),
+          10000,
+          "Teklif bildirimi zaman aşımına uğradı (10sn)."
+        );
       } catch (notifyError) {
         appendRuntimeLog("warn", "BID_NOTIFY_WARN", notifyError?.message || "Notification timeout");
       }
@@ -1016,13 +1008,17 @@ export default function App() {
       // 1. Update Bid
       await updateBidStatusApi({ bidId, status: action });
 
-      // 2. Notify Driver
+      // 2. Notify Driver (non-blocking)
       const statusText = action === 'ACCEPTED' ? 'KABUL EDİLDİ ✅' : 'REDDEDİLDİ ❌';
-      await createNotificationApi({
-        userId: driverId,
-        actorId: user.id,
-        message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to}. Yükleme: ${pickupDateText}.`,
-      });
+      try {
+        await createNotificationApi({
+          userId: driverId,
+          actorId: user.id,
+          message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to}. Yükleme: ${pickupDateText}.`,
+        });
+      } catch (notifyDriverError) {
+        appendRuntimeLog("warn", "BID_NOTIFY_DECISION_WARN", notifyDriverError?.message || "Decision notify failed");
+      }
 
       if (action === "ACCEPTED") {
         // Keep marketplace consistent: accepted offer closes load and rejects pending alternatives.
@@ -1030,11 +1026,15 @@ export default function App() {
         const pendingOthers = loadBids.filter((bid) => bid.id !== bidId && bid.status === "PENDING");
         for (const otherBid of pendingOthers) {
           await updateBidStatusApi({ bidId: otherBid.id, status: "REJECTED" });
-          await createNotificationApi({
-            userId: otherBid.driver_id,
-            actorId: user.id,
-            message: `Bilgi: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanında başka teklif kabul edildi.`,
-          });
+          try {
+            await createNotificationApi({
+              userId: otherBid.driver_id,
+              actorId: user.id,
+              message: `Bilgi: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanında başka teklif kabul edildi.`,
+            });
+          } catch (notifyOtherError) {
+            appendRuntimeLog("warn", "BID_NOTIFY_OTHER_WARN", notifyOtherError?.message || "Other notify failed");
+          }
         }
       }
 
@@ -1058,6 +1058,34 @@ export default function App() {
       console.error("Error responding to bid:", e);
       appendRuntimeLog("error", "BID_DECISION_FAIL", e?.message || "Bid decision failed");
       showToast("İşlem başarısız", "error");
+    }
+  };
+
+  const handleSwitchRole = async (nextRole) => {
+    if (!user || !nextRole) return;
+    const normalizedRole = String(nextRole).toLowerCase() === "employer" ? "employer" : "driver";
+    if (profile?.role === normalizedRole) {
+      showToast("Rol zaten aktif.");
+      return;
+    }
+    setIsUpdatingRole(true);
+    try {
+      const updated = await withTimeout(
+        updateProfileRoleApi({ userId: user.id, role: normalizedRole }),
+        12000,
+        "Rol güncelleme zaman aşımına uğradı (12sn)."
+      );
+      setProfile(updated);
+      setShowProfileCard(false);
+      setShowSettingsPanel(false);
+      setScreen("welcome");
+      appendRuntimeLog("info", "ROLE_SWITCH_OK", `role=${normalizedRole}`);
+      showToast(normalizedRole === "employer" ? "🏢 İşveren rolüne geçildi." : "🚛 İş Arıyorum rolüne geçildi.");
+    } catch (error) {
+      appendRuntimeLog("error", "ROLE_SWITCH_FAIL", error?.message || "Role switch failed");
+      showToast(`Rol değişmedi: ${error?.message || "Bilinmeyen hata"}`, "error");
+    } finally {
+      setIsUpdatingRole(false);
     }
   };
 
@@ -1658,6 +1686,9 @@ export default function App() {
   const statLoads = useAnimatedCount(publicStats.activeLoads);
   const statDrivers = useAnimatedCount(publicStats.activeDrivers);
   const statCities = useAnimatedCount(publicStats.activeCities);
+  const activeRole = profile?.role === "employer" ? "employer" : profile?.role === "driver" ? "driver" : null;
+  const showDriverHomeAction = !user || activeRole !== "employer";
+  const showEmployerHomeAction = !user || activeRole !== "driver";
 
   return (
     <div className="app-shell min-h-screen flex items-center justify-center p-3 sm:p-5">
@@ -1858,30 +1889,34 @@ export default function App() {
 
                 {/* ─── ACTION BUTTONS (Above the Fold) ─── */}
                 <div className="space-y-3 mb-6">
-                  <button
-                    onClick={() => nav("location")}
-                    className="group w-full py-6 px-5 rounded-3xl text-white text-xl font-black active:scale-[0.98] transition-all relative overflow-hidden shadow-lg hover:shadow-blue-500/20 hover-scale"
-                    style={{ background: "linear-gradient(180deg,#60a5fa 0%,#2563eb 100%)", boxShadow: "0 10px 20px -5px rgba(37,99,235,0.4)" }}
-                  >
-                    <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/10 to-transparent" />
-                    <span className="relative flex items-center justify-center gap-3">
-                      <span className="bg-white/20 p-2.5 rounded-xl group-hover:scale-110 transition-transform">🚛</span>
-                      İŞ ARIYORUM
-                    </span>
-                    <p className="relative text-white/60 text-xs font-medium mt-1">Yük ara, teklif ver</p>
-                  </button>
-                  <button
-                    onClick={() => nav("employer")}
-                    className="group w-full py-5 px-5 rounded-3xl text-white text-lg font-black active:scale-[0.98] transition-all relative overflow-hidden shadow-lg hover:shadow-orange-500/20 hover-scale"
-                    style={{ background: "linear-gradient(180deg,#fb923c 0%,#ea580c 100%)", boxShadow: "0 8px 16px -5px rgba(234,88,12,0.3)" }}
-                  >
-                    <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/10 to-transparent" />
-                    <span className="relative flex items-center justify-center gap-3">
-                      <span className="bg-white/20 p-2 rounded-xl group-hover:scale-110 transition-transform">🏢</span>
-                      İŞVERENİM
-                    </span>
-                    <p className="relative text-white/50 text-xs font-medium mt-1">Yük ilanı ver, şoför bul</p>
-                  </button>
+                  {showDriverHomeAction && (
+                    <button
+                      onClick={() => nav("location")}
+                      className="group w-full py-6 px-5 rounded-3xl text-white text-xl font-black active:scale-[0.98] transition-all relative overflow-hidden shadow-lg hover:shadow-blue-500/20 hover-scale"
+                      style={{ background: "linear-gradient(180deg,#60a5fa 0%,#2563eb 100%)", boxShadow: "0 10px 20px -5px rgba(37,99,235,0.4)" }}
+                    >
+                      <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/10 to-transparent" />
+                      <span className="relative flex items-center justify-center gap-3">
+                        <span className="bg-white/20 p-2.5 rounded-xl group-hover:scale-110 transition-transform">🚛</span>
+                        İŞ ARIYORUM
+                      </span>
+                      <p className="relative text-white/60 text-xs font-medium mt-1">Yük ara, teklif ver</p>
+                    </button>
+                  )}
+                  {showEmployerHomeAction && (
+                    <button
+                      onClick={() => nav("employer")}
+                      className="group w-full py-5 px-5 rounded-3xl text-white text-lg font-black active:scale-[0.98] transition-all relative overflow-hidden shadow-lg hover:shadow-orange-500/20 hover-scale"
+                      style={{ background: "linear-gradient(180deg,#fb923c 0%,#ea580c 100%)", boxShadow: "0 8px 16px -5px rgba(234,88,12,0.3)" }}
+                    >
+                      <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/10 to-transparent" />
+                      <span className="relative flex items-center justify-center gap-3">
+                        <span className="bg-white/20 p-2 rounded-xl group-hover:scale-110 transition-transform">🏢</span>
+                        İŞVERENİM
+                      </span>
+                      <p className="relative text-white/50 text-xs font-medium mt-1">Yük ilanı ver, şoför bul</p>
+                    </button>
+                  )}
                   {user && (
                     <button
                       onClick={openRoleFeed}
@@ -2903,7 +2938,7 @@ export default function App() {
               <div className="px-5 py-4 border-b border-slate-700/50 bg-gradient-to-r from-blue-600/15 to-cyan-500/15 flex items-center justify-between">
                 <div>
                   <p className="text-white text-lg font-black tracking-tight">⚙️ Ayarlar</p>
-                  <p className="text-slate-400 text-xs">Hazırlık ekranı (yakında aktif)</p>
+                  <p className="text-slate-400 text-xs">Profil ve rol tercihleri</p>
                 </div>
                 <button
                   type="button"
@@ -2915,6 +2950,43 @@ export default function App() {
               </div>
 
               <div className="p-4 space-y-3">
+                {user && (
+                  <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50">
+                    <p className="text-white text-sm font-bold">Aktif Rol</p>
+                    <p className="text-slate-400 text-xs mt-1">
+                      Ana sayfada yalnızca seçtiğin role ait akış görünür.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 mt-3">
+                      <button
+                        type="button"
+                        disabled={isUpdatingRole}
+                        onClick={() => handleSwitchRole("driver")}
+                        className={`py-2.5 rounded-lg text-xs font-black border transition-all active:scale-95 ${
+                          profile?.role === "driver"
+                            ? "bg-blue-500/20 text-blue-300 border-blue-500/40"
+                            : "bg-slate-900 text-slate-300 border-slate-700"
+                        } ${isUpdatingRole ? "opacity-60 cursor-not-allowed" : ""}`}
+                      >
+                        🚛 İş Arıyorum
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isUpdatingRole}
+                        onClick={() => handleSwitchRole("employer")}
+                        className={`py-2.5 rounded-lg text-xs font-black border transition-all active:scale-95 ${
+                          profile?.role === "employer"
+                            ? "bg-orange-500/20 text-orange-300 border-orange-500/40"
+                            : "bg-slate-900 text-slate-300 border-slate-700"
+                        } ${isUpdatingRole ? "opacity-60 cursor-not-allowed" : ""}`}
+                      >
+                        🏢 İşverenim
+                      </button>
+                    </div>
+                    {isUpdatingRole && (
+                      <p className="text-[10px] text-cyan-300 mt-2 font-bold">Rol güncelleniyor...</p>
+                    )}
+                  </div>
+                )}
                 <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50">
                   <p className="text-white text-sm font-bold">Bildirim Tercihleri</p>
                   <p className="text-slate-400 text-xs mt-1">İlan, teklif ve mesaj bildirimlerini özelleştirme</p>
