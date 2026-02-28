@@ -691,20 +691,6 @@ export default function App() {
     appendRuntimeLog("info", "POST_LOAD_STARTED", `${empForm.from} -> ${empForm.to} | ${empForm.type}`);
     setIsPostingLoad(true);
     try {
-      const ensuredProfile = await withTimeout(
-        ensureProfileApi({
-          userId: user.id,
-          email: user.email,
-          fullName: profile?.full_name || user.user_metadata?.full_name,
-          phone: profile?.phone,
-          role: profile?.role || "employer",
-        }),
-        15000,
-        "Profil kontrolü zaman aşımına uğradı (15sn)."
-      );
-      appendRuntimeLog("info", "POST_LOAD_PROFILE_READY", `role=${ensuredProfile?.role || "unknown"}`);
-      setProfile(ensuredProfile);
-
       const loadData = {
         origin_city: empForm.from,
         destination_city: empForm.to,
@@ -722,11 +708,46 @@ export default function App() {
         currency: "TRY",
       };
 
-      await withTimeout(
-        createLoadApi(loadData),
-        15000,
-        "İlan oluşturma zaman aşımına uğradı (15sn)."
-      );
+      const publishLoad = async () =>
+        withTimeout(
+          createLoadApi(loadData),
+          15000,
+          "İlan oluşturma zaman aşımına uğradı (15sn)."
+        );
+
+      try {
+        await publishLoad();
+      } catch (firstError) {
+        const firstMessage = (firstError?.cause?.message || firstError?.message || "").toLowerCase();
+        const mightNeedProfileRepair =
+          firstMessage.includes("foreign key") ||
+          firstMessage.includes("profiles") ||
+          firstMessage.includes("employer_id") ||
+          firstMessage.includes("violates");
+
+        if (!mightNeedProfileRepair) {
+          throw firstError;
+        }
+
+        appendRuntimeLog("warn", "POST_LOAD_PROFILE_REPAIR", firstMessage || "Profil satiri dogrulanip yeniden denenecek.");
+
+        const ensuredProfile = await withTimeout(
+          ensureProfileApi({
+            userId: user.id,
+            email: user.email,
+            fullName: profile?.full_name || user.user_metadata?.full_name,
+            phone: profile?.phone,
+            role: profile?.role || "employer",
+          }),
+          12000,
+          "Profil onarımı zaman aşımına uğradı (12sn)."
+        );
+        setProfile(ensuredProfile);
+        appendRuntimeLog("info", "POST_LOAD_PROFILE_READY", `role=${ensuredProfile?.role || "unknown"}`);
+
+        await publishLoad();
+      }
+
       showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 100);
