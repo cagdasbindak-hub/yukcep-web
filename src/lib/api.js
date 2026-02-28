@@ -1,4 +1,4 @@
-import { supabase } from "./supabase";
+import { supabase, SUPABASE_ANON_KEY, SUPABASE_URL } from "./supabase";
 
 const unwrap = (result, context) => {
   if (result.error) {
@@ -198,6 +198,60 @@ export const createLoadApi = async (loadData) => {
   }
 
   return unwrap(first, "Failed to create load");
+};
+
+export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 20000 }) => {
+  if (!accessToken) {
+    throw new Error("REST insert requires a valid access token.");
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/loads`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(loadData),
+    });
+
+    const text = await res.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+
+    if (!res.ok) {
+      const message =
+        (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
+        text ||
+        `HTTP ${res.status}`;
+      throw new Error(`REST insert failed: ${message}`);
+    }
+
+    if (Array.isArray(parsed) && parsed[0]?.id) {
+      return { id: parsed[0].id };
+    }
+    if (parsed?.id) {
+      return { id: parsed.id };
+    }
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`REST insert timeout after ${timeoutMs / 1000}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 };
 
 export const fetchPublicStatsApi = async () => {

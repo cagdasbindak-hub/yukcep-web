@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase';
 import {
   createBidApi,
   createLoadApi,
+  createLoadViaRestApi,
   createNotificationApi,
   ensureProfileApi,
   fetchBidsForLoadApi,
@@ -192,6 +193,7 @@ export default function App() {
   const [loadBids, setLoadBids] = useState([]);
   const [isProcessingBid, setIsProcessingBid] = useState(false);
   const [isPostingLoad, setIsPostingLoad] = useState(false);
+  const [postLoadError, setPostLoadError] = useState("");
   const [runtimeLogs, setRuntimeLogs] = useState([]);
   const [showRuntimeLogs, setShowRuntimeLogs] = useState(false);
 
@@ -505,10 +507,11 @@ export default function App() {
     }
   };
 
-  const showToast = (msg, type = "success") => {
+  const showToast = (msg, type = "success", durationMs) => {
     setToast(msg);
     setToastType(type);
-    setTimeout(() => setToast(null), 3000);
+    const ttl = typeof durationMs === "number" ? durationMs : (type === "error" ? 9000 : 3000);
+    setTimeout(() => setToast(null), ttl);
   };
 
   useEffect(() => {
@@ -676,21 +679,26 @@ export default function App() {
   const handlePostLoad = async () => {
     if (!validateForm()) {
       appendRuntimeLog("warn", "POST_LOAD_VALIDATION_FAIL", "Eksik veya hatali form alani.");
+      setPostLoadError("Eksik veya hatalı form alanı.");
       showToast("⚠️ Lütfen eksik alanları doldurun.", "error");
       return;
     }
 
     if (!user) {
       appendRuntimeLog("warn", "POST_LOAD_NO_SESSION", "Kullanici oturumu yok.");
+      setPostLoadError("Oturum bulunamadı. Lütfen tekrar giriş yapın.");
       showToast("İlan vermek için giriş yapmalısınız.", "error");
       nav("auth");
       return;
     }
 
     const startTs = Date.now();
+    setPostLoadError("");
     appendRuntimeLog("info", "POST_LOAD_STARTED", `${empForm.from} -> ${empForm.to} | ${empForm.type}`);
     setIsPostingLoad(true);
     try {
+      let accessToken = null;
+
       // Session check should never block publishing. If it times out, continue and let DB decide.
       try {
         const sessionResult = await withTimeout(
@@ -704,6 +712,7 @@ export default function App() {
         } else if (activeSession.user.id !== user.id) {
           appendRuntimeLog("warn", "POST_LOAD_SESSION_MISMATCH", `session=${activeSession.user.id} ui=${user.id}`);
         } else {
+          accessToken = activeSession.access_token || null;
           appendRuntimeLog("info", "POST_LOAD_SESSION_OK", `user=${activeSession.user.id}`);
         }
       } catch (sessionCheckError) {
@@ -775,16 +784,39 @@ export default function App() {
           await publishLoad();
         } else if (isTimeout) {
           appendRuntimeLog("warn", "POST_LOAD_RETRY", "İlk deneme timeout, ikinci deneme başlatılıyor.");
-          await withTimeout(
-            createLoadApi(loadData),
-            40000,
-            "İlan oluşturma ikinci denemede de zaman aşımına uğradı (40sn)."
-          );
+          if (!accessToken) {
+            try {
+              const retrySession = await withTimeout(
+                supabase.auth.getSession(),
+                4000,
+                "Retry session check timeout."
+              );
+              accessToken = retrySession?.data?.session?.access_token || null;
+            } catch {
+              // ignore
+            }
+          }
+
+          if (accessToken) {
+            appendRuntimeLog("info", "POST_LOAD_RETRY_REST", "REST fallback ile insert deneniyor.");
+            await withTimeout(
+              createLoadViaRestApi({ loadData, accessToken, timeoutMs: 30000 }),
+              32000,
+              "REST fallback insert de zaman aşımına uğradı (32sn)."
+            );
+          } else {
+            await withTimeout(
+              createLoadApi(loadData),
+              40000,
+              "İlan oluşturma ikinci denemede de zaman aşımına uğradı (40sn)."
+            );
+          }
         } else {
           throw firstError;
         }
       }
 
+      setPostLoadError("");
       showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 100);
@@ -809,6 +841,7 @@ export default function App() {
       console.error("Insert error:", error);
       const backendMessage = error?.cause?.message || error?.message || "İlan eklenemedi.";
       appendRuntimeLog("error", "POST_LOAD_FAILED", backendMessage);
+      setPostLoadError(backendMessage);
       showToast(`❌ Hata: ${backendMessage}`, "error");
     } finally {
       setIsPostingLoad(false);
@@ -1781,6 +1814,12 @@ export default function App() {
                     <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/20 to-transparent" />
                     <span className="relative drop-shadow-sm">{isPostingLoad ? "YAYINLANIYOR..." : (empForm.fleet ? "FİLO İLANI YAYINLA" : "📢 İLANI YAYINLA")}</span>
                   </button>
+                  {postLoadError && (
+                    <div className="mt-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
+                      <p className="text-red-300 text-xs font-bold">Son Hata</p>
+                      <p className="text-red-200 text-xs leading-relaxed mt-1">{postLoadError}</p>
+                    </div>
+                  )}
                 </div>
 
               </div>

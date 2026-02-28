@@ -2,13 +2,13 @@ import { createClient } from '@supabase/supabase-js';
 
 const fallbackSupabaseUrl = 'https://uojbatkufexxwdosomxk.supabase.co';
 const fallbackSupabaseAnonKey = 'sb_publishable_tsdP4zYiDsBaL8ihojZ6Zg_hiHEGX60';
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || fallbackSupabaseUrl;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || fallbackSupabaseAnonKey;
+export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || fallbackSupabaseUrl;
+export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || fallbackSupabaseAnonKey;
 
-if (!supabaseUrl || !supabaseAnonKey) {
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error(
         'Missing Supabase environment variables. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
     );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
