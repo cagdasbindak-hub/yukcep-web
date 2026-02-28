@@ -691,6 +691,17 @@ export default function App() {
     appendRuntimeLog("info", "POST_LOAD_STARTED", `${empForm.from} -> ${empForm.to} | ${empForm.type}`);
     setIsPostingLoad(true);
     try {
+      const sessionResult = await withTimeout(
+        supabase.auth.getSession(),
+        8000,
+        "Oturum doğrulama zaman aşımına uğradı (8sn)."
+      );
+      const activeSession = sessionResult?.data?.session;
+      if (!activeSession?.user?.id || activeSession.user.id !== user.id) {
+        throw new Error("Oturum geçersiz. Lütfen çıkış yapıp tekrar giriş yapın.");
+      }
+      appendRuntimeLog("info", "POST_LOAD_SESSION_OK", `user=${activeSession.user.id}`);
+
       const loadData = {
         origin_city: empForm.from,
         destination_city: empForm.to,
@@ -711,41 +722,49 @@ export default function App() {
       const publishLoad = async () =>
         withTimeout(
           createLoadApi(loadData),
-          15000,
-          "İlan oluşturma zaman aşımına uğradı (15sn)."
+          25000,
+          "İlan oluşturma zaman aşımına uğradı (25sn)."
         );
 
       try {
         await publishLoad();
       } catch (firstError) {
         const firstMessage = (firstError?.cause?.message || firstError?.message || "").toLowerCase();
+        const isTimeout = firstMessage.includes("zaman aşımına uğradı");
         const mightNeedProfileRepair =
           firstMessage.includes("foreign key") ||
           firstMessage.includes("profiles") ||
           firstMessage.includes("employer_id") ||
           firstMessage.includes("violates");
 
-        if (!mightNeedProfileRepair) {
+        if (mightNeedProfileRepair) {
+          appendRuntimeLog("warn", "POST_LOAD_PROFILE_REPAIR", firstMessage || "Profil satiri dogrulanip yeniden denenecek.");
+
+          const ensuredProfile = await withTimeout(
+            ensureProfileApi({
+              userId: user.id,
+              email: user.email,
+              fullName: profile?.full_name || user.user_metadata?.full_name,
+              phone: profile?.phone,
+              role: profile?.role || "employer",
+            }),
+            12000,
+            "Profil onarımı zaman aşımına uğradı (12sn)."
+          );
+          setProfile(ensuredProfile);
+          appendRuntimeLog("info", "POST_LOAD_PROFILE_READY", `role=${ensuredProfile?.role || "unknown"}`);
+
+          await publishLoad();
+        } else if (isTimeout) {
+          appendRuntimeLog("warn", "POST_LOAD_RETRY", "İlk deneme timeout, ikinci deneme başlatılıyor.");
+          await withTimeout(
+            createLoadApi(loadData),
+            40000,
+            "İlan oluşturma ikinci denemede de zaman aşımına uğradı (40sn)."
+          );
+        } else {
           throw firstError;
         }
-
-        appendRuntimeLog("warn", "POST_LOAD_PROFILE_REPAIR", firstMessage || "Profil satiri dogrulanip yeniden denenecek.");
-
-        const ensuredProfile = await withTimeout(
-          ensureProfileApi({
-            userId: user.id,
-            email: user.email,
-            fullName: profile?.full_name || user.user_metadata?.full_name,
-            phone: profile?.phone,
-            role: profile?.role || "employer",
-          }),
-          12000,
-          "Profil onarımı zaman aşımına uğradı (12sn)."
-        );
-        setProfile(ensuredProfile);
-        appendRuntimeLog("info", "POST_LOAD_PROFILE_READY", `role=${ensuredProfile?.role || "unknown"}`);
-
-        await publishLoad();
       }
 
       showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
