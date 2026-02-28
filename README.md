@@ -36,6 +36,7 @@ The canonical schema is in [`schema.sql`](./schema.sql) and includes:
 - `loads`
 - `bids`
 - `notifications`
+- `runtime_logs`
 - Row-Level Security (RLS) policies matching frontend behavior
 
 Apply the schema in your Supabase SQL editor before using authenticated flows.

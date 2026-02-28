@@ -72,6 +72,16 @@ const fetchJsonWithTimeout = async ({ url, headers, timeoutMs }) => {
   }
 };
 
+const buildProfileMap = (rows = []) => {
+  const map = new Map();
+  rows.forEach((row) => {
+    if (row?.id) {
+      map.set(row.id, row);
+    }
+  });
+  return map;
+};
+
 export const fetchProfileById = async (userId) => {
   const res = await supabase.from("profiles").select("*").eq("id", userId).single();
   return unwrap(res, "Failed to fetch profile");
@@ -122,6 +132,43 @@ export const fetchLoadDetailsApi = async (loadId) => {
     .eq("id", loadId)
     .single();
   return unwrap(res, "Failed to fetch load details");
+};
+
+export const fetchLoadDetailsViaRestApi = async ({ loadId, timeoutMs = 12000 }) => {
+  const headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+  };
+
+  const loadRows = await fetchJsonWithTimeout({
+    url: `${SUPABASE_URL}/rest/v1/loads?select=*&id=eq.${encodeURIComponent(loadId)}&limit=1`,
+    headers,
+    timeoutMs,
+  });
+
+  const load = Array.isArray(loadRows) ? loadRows[0] : null;
+  if (!load) {
+    throw new Error("Load not found.");
+  }
+
+  let profile = null;
+  if (load.employer_id) {
+    try {
+      const profileRows = await fetchJsonWithTimeout({
+        url: `${SUPABASE_URL}/rest/v1/profiles?select=*&id=eq.${load.employer_id}&limit=1`,
+        headers,
+        timeoutMs,
+      });
+      profile = Array.isArray(profileRows) ? profileRows[0] || null : null;
+    } catch {
+      profile = null;
+    }
+  }
+
+  return {
+    ...load,
+    profiles: profile,
+  };
 };
 
 export const fetchMyBidForLoadApi = async (loadId, userId) => {
@@ -191,7 +238,7 @@ export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => 
   if (filterTrailer) query = query.eq("trailer_type", filterTrailer);
 
   const res = await query;
-  const data = unwrap(res, "Failed to fetch loads");
+  const data = unwrap(res, "Failed to fetch loads").filter((load) => isActiveLoadStatus(load.status));
 
   const fromKey = normalizeCityKey(filterFrom);
   const toKey = normalizeCityKey(filterTo);
@@ -206,6 +253,66 @@ export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => 
     if (toKey && destinationKey !== toKey) return false;
     return true;
   });
+};
+
+export const fetchLoadsViaRestApi = async ({
+  filterFrom,
+  filterTo,
+  filterTrailer,
+  timeoutMs = 12000,
+} = {}) => {
+  const headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+  };
+
+  const query = new URLSearchParams();
+  query.set("select", "*");
+  query.set("order", "created_at.desc");
+  if (filterTrailer) {
+    query.set("trailer_type", `eq.${filterTrailer}`);
+  }
+
+  const loadRows = await fetchJsonWithTimeout({
+    url: `${SUPABASE_URL}/rest/v1/loads?${query.toString()}`,
+    headers,
+    timeoutMs,
+  });
+
+  const activeLoads = Array.isArray(loadRows)
+    ? loadRows.filter((row) => isActiveLoadStatus(row.status))
+    : [];
+  const employerIds = [...new Set(activeLoads.map((row) => row?.employer_id).filter(Boolean))];
+
+  let profileMap = new Map();
+  if (employerIds.length) {
+    try {
+      const profileRows = await fetchJsonWithTimeout({
+        url: `${SUPABASE_URL}/rest/v1/profiles?select=id,full_name,avatar_url,phone,role&id=in.(${employerIds.join(",")})`,
+        headers,
+        timeoutMs,
+      });
+      profileMap = buildProfileMap(Array.isArray(profileRows) ? profileRows : []);
+    } catch {
+      // Profiles join is best-effort on fallback path.
+    }
+  }
+
+  const fromKey = normalizeCityKey(filterFrom);
+  const toKey = normalizeCityKey(filterTo);
+
+  return activeLoads
+    .filter((load) => {
+      const originKey = normalizeCityKey(load.origin_city);
+      const destinationKey = normalizeCityKey(load.destination_city);
+      if (fromKey && originKey !== fromKey) return false;
+      if (toKey && destinationKey !== toKey) return false;
+      return true;
+    })
+    .map((load) => ({
+      ...load,
+      profiles: profileMap.get(load.employer_id) || null,
+    }));
 };
 
 export const createLoadApi = async (loadData) => {
@@ -375,6 +482,14 @@ export const fetchPublicStatsViaRestApi = async ({ timeoutMs = 12000 } = {}) => 
     activeDrivers,
     activeCities: citySet.size,
   };
+};
+
+export const insertRuntimeLogsApi = async ({ logs }) => {
+  const payload = Array.isArray(logs) ? logs.filter(Boolean).slice(0, 50) : [];
+  if (!payload.length) return [];
+
+  const res = await supabase.from("runtime_logs").insert(payload).select("id");
+  return unwrap(res, "Failed to insert runtime logs");
 };
 
 export const ensureProfileApi = async ({ userId, email, fullName, phone, role }) => {

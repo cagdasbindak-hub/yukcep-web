@@ -9,12 +9,15 @@ import {
   ensureProfileApi,
   fetchBidsForLoadApi,
   fetchLoadDetailsApi,
+  fetchLoadDetailsViaRestApi,
   fetchLoadsApi,
+  fetchLoadsViaRestApi,
   fetchMyBidForLoadApi,
   fetchNotificationsApi,
   fetchPublicStatsApi,
   fetchPublicStatsViaRestApi,
   fetchProfileById,
+  insertRuntimeLogsApi,
   markNotificationReadApi,
   updateBidStatusApi,
 } from './lib/api';
@@ -56,9 +59,9 @@ const empReviews = {
 const getER = name => empReviews[name] || empReviews["default"];
 
 const RELEASE_UPDATES_SEED = [
-  { date: "2026-02-28", title: "Sayaçlar Supabase + REST + local fallback ile 0/0 bug'ına karşı güçlendirildi." },
-  { date: "2026-02-28", title: "İlan yayınlandıktan sonra liste ve sayaçlar optimistic olarak anında güncelleniyor." },
-  { date: "2026-02-28", title: "Son 10 Güncelleme paneli kalıcı (localStorage) hale getirildi." },
+  { date: "2026-02-28", title: "Runtime logları için Supabase runtime_logs kuyruğu ve otomatik flush eklendi." },
+  { date: "2026-02-28", title: "Yük listeleme akışına Supabase timeout sonrası REST fallback eklendi." },
+  { date: "2026-02-28", title: "Sayaç fallback mantığında eski yüksek değerin kilitlenme bug'ı düzeltildi." },
   { date: "2026-02-28", title: "İlan listesi canlı güncelleme (insert/update/delete) ile senkronlandı." },
   { date: "2026-02-28", title: "Şehir filtrelerinde Türkçe karakter/case normalizasyonu eklendi." },
   { date: "2026-02-28", title: "Detaylı Türkiye haritası ve il bazlı nokta gösterimi eklendi." },
@@ -70,6 +73,28 @@ const RELEASE_UPDATES_SEED = [
 const LOG_STORAGE_KEY = "yukcep_runtime_logs_v1";
 const PUBLIC_STATS_CACHE_KEY = "yukcep_public_stats_cache_v1";
 const RELEASE_UPDATES_KEY = "yukcep_release_updates_v1";
+const REMOTE_LOG_FLUSH_SIZE = 6;
+const REMOTE_LOG_FLUSH_DELAY_MS = 2200;
+
+const sanitizeRemoteLogDetails = (value = "") =>
+  String(value || "")
+    .slice(0, 320)
+    .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, "[email]")
+    .replace(/\+?\d[\d\s().-]{8,}\d/g, "[phone]")
+    .replace(/\b(?:ghp|github_pat)_[A-Za-z0-9_]+\b/g, "[token]");
+
+const getRuntimeSessionId = () => {
+  try {
+    const key = "yukcep_runtime_session_id_v1";
+    const existing = localStorage.getItem(key);
+    if (existing) return existing;
+    const next = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    localStorage.setItem(key, next);
+    return next;
+  } catch {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+};
 
 const sanitizeReleaseUpdates = (items = []) => {
   const normalized = [];
@@ -274,14 +299,105 @@ export default function App() {
   const [runtimeLogs, setRuntimeLogs] = useState([]);
   const [showRuntimeLogs, setShowRuntimeLogs] = useState(false);
   const [releaseUpdates, setReleaseUpdates] = useState(RELEASE_UPDATES_SEED);
+  const remoteLogQueueRef = useRef([]);
+  const remoteLogTimerRef = useRef(null);
+  const remoteLogFlushRef = useRef(null);
+  const remoteLogInFlightRef = useRef(false);
+  const remoteLogDisabledRef = useRef(false);
+  const runtimeSessionIdRef = useRef(getRuntimeSessionId());
 
-  const appendRuntimeLog = useCallback((level, event, details = "") => {
+  const flushRemoteRuntimeLogs = useCallback(async () => {
+    if (remoteLogDisabledRef.current || remoteLogInFlightRef.current) return;
+    if (!remoteLogQueueRef.current.length) return;
+    if (remoteLogTimerRef.current) {
+      clearTimeout(remoteLogTimerRef.current);
+      remoteLogTimerRef.current = null;
+    }
+
+    const batch = remoteLogQueueRef.current.splice(0, 25);
+    remoteLogInFlightRef.current = true;
+    try {
+      await insertRuntimeLogsApi({ logs: batch });
+    } catch (error) {
+      const message = String(error?.message || "");
+      const lower = message.toLowerCase();
+      const isConfigError =
+        lower.includes("runtime_logs") ||
+        lower.includes("does not exist") ||
+        lower.includes("permission") ||
+        lower.includes("policy");
+
+      if (isConfigError) {
+        if (!remoteLogDisabledRef.current) {
+          const localWarn = {
+            id: `${Date.now()}-remotelog`,
+            at: new Date().toISOString(),
+            level: "warn",
+            event: "REMOTE_LOG_SYNC_DISABLED",
+            details: "runtime_logs tablosu/policy eksik. schema.sql uygulanana kadar sadece local log tutulacak.",
+          };
+          setRuntimeLogs((prev) => {
+            const merged = [localWarn, ...prev].slice(0, 100);
+            try {
+              localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(merged));
+            } catch {
+              // noop
+            }
+            return merged;
+          });
+        }
+        remoteLogDisabledRef.current = true;
+        console.warn("runtime_logs sync disabled:", message);
+      } else {
+        remoteLogQueueRef.current = [...batch, ...remoteLogQueueRef.current].slice(0, 120);
+      }
+    } finally {
+      remoteLogInFlightRef.current = false;
+      if (remoteLogQueueRef.current.length && !remoteLogDisabledRef.current) {
+        if (remoteLogTimerRef.current) {
+          clearTimeout(remoteLogTimerRef.current);
+          remoteLogTimerRef.current = null;
+        }
+        remoteLogTimerRef.current = setTimeout(() => {
+          remoteLogTimerRef.current = null;
+          remoteLogFlushRef.current?.();
+        }, REMOTE_LOG_FLUSH_DELAY_MS);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    remoteLogFlushRef.current = flushRemoteRuntimeLogs;
+  }, [flushRemoteRuntimeLogs]);
+
+  const enqueueRemoteRuntimeLog = useCallback((logRow) => {
+    if (remoteLogDisabledRef.current) return;
+    remoteLogQueueRef.current.push(logRow);
+    if (remoteLogQueueRef.current.length >= REMOTE_LOG_FLUSH_SIZE) {
+      if (remoteLogTimerRef.current) {
+        clearTimeout(remoteLogTimerRef.current);
+        remoteLogTimerRef.current = null;
+      }
+      remoteLogFlushRef.current?.();
+      return;
+    }
+    if (!remoteLogTimerRef.current) {
+      remoteLogTimerRef.current = setTimeout(() => {
+        remoteLogTimerRef.current = null;
+        remoteLogFlushRef.current?.();
+      }, REMOTE_LOG_FLUSH_DELAY_MS);
+    }
+  }, []);
+
+  const appendRuntimeLog = useCallback((level, event, details = "", options = {}) => {
+    const detailText = String(details || "").slice(0, 320);
+    const nowIso = new Date().toISOString();
     const next = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      at: new Date().toISOString(),
+      at: nowIso,
       level,
       event,
-      details: String(details || "").slice(0, 320),
+      details: detailText,
     };
     setRuntimeLogs((prev) => {
       const merged = [next, ...prev].slice(0, 100);
@@ -292,7 +408,20 @@ export default function App() {
       }
       return merged;
     });
-  }, []);
+
+    if (!options?.skipRemote) {
+      enqueueRemoteRuntimeLog({
+        client_event_at: nowIso,
+        level: String(level || "info").toLowerCase(),
+        event_code: String(event || "UNKNOWN"),
+        details: sanitizeRemoteLogDetails(detailText),
+        session_id: runtimeSessionIdRef.current,
+        user_id: user?.id || null,
+        screen: screen || null,
+        app_version: "2026.02.28",
+      });
+    }
+  }, [enqueueRemoteRuntimeLog, screen, user?.id]);
 
   const clearRuntimeLogs = useCallback(() => {
     setRuntimeLogs([]);
@@ -335,14 +464,18 @@ export default function App() {
       const prevLoads = Number(prev?.activeLoads) || 0;
       const prevDrivers = Number(prev?.activeDrivers) || 0;
       const prevCities = Number(prev?.activeCities) || 0;
+      const derivedLoads = Number(localDerived?.activeLoads) || 0;
+      const derivedCities = Number(localDerived?.activeCities) || 0;
+      const nextLoads = options.incrementLoads
+        ? Math.max(derivedLoads, prevLoads + 1)
+        : derivedLoads;
+      const nextCities = options.incrementLoads
+        ? Math.max(derivedCities, prevCities)
+        : derivedCities;
       const next = {
-        activeLoads: Math.max(
-          options.incrementLoads ? prevLoads + 1 : prevLoads,
-          localDerived.activeLoads,
-          prevLoads
-        ),
+        activeLoads: nextLoads,
         activeDrivers: prevDrivers,
-        activeCities: Math.max(prevCities, localDerived.activeCities),
+        activeCities: nextCities,
       };
 
       if (
@@ -432,6 +565,29 @@ export default function App() {
       persistReleaseUpdates(RELEASE_UPDATES_SEED);
     }
   }, [persistReleaseUpdates]);
+
+  useEffect(() => {
+    const flushNow = () => {
+      remoteLogFlushRef.current?.();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        flushNow();
+      }
+    };
+
+    window.addEventListener("beforeunload", flushNow);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("beforeunload", flushNow);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (remoteLogTimerRef.current) {
+        clearTimeout(remoteLogTimerRef.current);
+        remoteLogTimerRef.current = null;
+      }
+      flushNow();
+    };
+  }, []);
 
   useEffect(() => {
     const onWindowError = (event) => {
@@ -554,9 +710,20 @@ export default function App() {
 
   const handleLoadClick = async (loadId) => {
     // 1. Find basic load info from local state for immediate feedback
-    const basicLoad = realLoads.find(l => l.id === loadId);
+    const normalizedLoadId = Number(loadId);
+    const basicLoad = realLoads.find(l => Number(l.id) === normalizedLoadId);
     if (basicLoad) {
-      setSelectedLoadDetail(basicLoad);
+      setSelectedLoadDetail({
+        ...basicLoad,
+        employerName: basicLoad.employer || "İşveren",
+        employerPhone: null,
+        employerAvatar: basicLoad.employerAvatar || null,
+        employerRole: "employer",
+        raw: {
+          id: basicLoad.id,
+          employer_id: null,
+        },
+      });
     }
     
     // 2. Navigate to screen
@@ -569,7 +736,22 @@ export default function App() {
     
     // 3. Fetch full details including employer profile
     try {
-      const data = await fetchLoadDetailsApi(loadId);
+      let data = null;
+      try {
+        data = await withTimeout(
+          fetchLoadDetailsApi(normalizedLoadId || loadId),
+          10000,
+          "Yük detay sorgusu zaman aşımına uğradı (10sn)."
+        );
+      } catch (primaryError) {
+        appendRuntimeLog("warn", "LOAD_DETAIL_SUPABASE_FAIL", primaryError?.message || "Supabase detail failed");
+        data = await withTimeout(
+          fetchLoadDetailsViaRestApi({ loadId: normalizedLoadId || loadId, timeoutMs: 12000 }),
+          13000,
+          "Yük detay fallback zaman aşımına uğradı (13sn)."
+        );
+        appendRuntimeLog("info", "LOAD_DETAIL_REST_OK", `load_id=${normalizedLoadId || loadId}`);
+      }
         
       if (data) {
         // Merge Supabase data with UI mapping logic
@@ -590,10 +772,10 @@ export default function App() {
         if (user) {
           // Check if I am the owner
           if (data.employer_id === user.id) {
-            fetchBidsForLoad(loadId);
+            fetchBidsForLoad(normalizedLoadId || loadId);
           } else {
             // Check if I already bid
-            const myBid = await fetchMyBidForLoadApi(loadId, user.id);
+            const myBid = await fetchMyBidForLoadApi(normalizedLoadId || loadId, user.id);
             
             if (myBid) {
               setHasBid(true);
@@ -604,6 +786,8 @@ export default function App() {
       }
     } catch (e) {
       console.error("Error fetching load details:", e);
+      appendRuntimeLog("error", "LOAD_DETAIL_FAIL", e?.message || "Load detail fetch failed");
+      showToast("Yük detayı yüklenemedi.", "error");
     }
   };
 
@@ -809,16 +993,35 @@ export default function App() {
   const fetchLoads = useCallback(async () => {
     setIsLoading(true);
     try {
-      const data = await fetchLoadsApi({ filterFrom, filterTo, filterTrailer });
+      const data = await withTimeout(
+        fetchLoadsApi({ filterFrom, filterTo, filterTrailer }),
+        10000,
+        "Yük listesi sorgusu zaman aşımına uğradı (10sn)."
+      );
       const mappedLoads = data.map((l) => mapDbToUi(l));
       setRealLoads(mappedLoads);
+      return;
     } catch (error) {
-      console.error('Error fetching loads:', error);
-      appendRuntimeLog("warn", "LOADS_FETCH_FAIL", error?.message || "Loads fetch failed");
+      appendRuntimeLog("warn", "LOADS_SUPABASE_FAIL", error?.message || "Supabase loads failed");
+    }
+
+    try {
+      const restData = await fetchLoadsViaRestApi({
+        filterFrom,
+        filterTo,
+        filterTrailer,
+        timeoutMs: 12000,
+      });
+      const mappedLoads = restData.map((l) => mapDbToUi(l));
+      setRealLoads(mappedLoads);
+      appendRuntimeLog("info", "LOADS_REST_OK", `rows=${mappedLoads.length}`);
+    } catch (restError) {
+      console.error("Error fetching loads:", restError);
+      appendRuntimeLog("error", "LOADS_FETCH_FAIL", restError?.message || "Loads fetch failed");
     } finally {
       setIsLoading(false);
     }
-  }, [appendRuntimeLog, filterFrom, filterTo, filterTrailer]);
+  }, [appendRuntimeLog, filterFrom, filterTo, filterTrailer, withTimeout]);
 
   // Fetch Loads from Supabase
   useEffect(() => {
@@ -1488,7 +1691,7 @@ export default function App() {
               <div className="px-5 pb-3 flex items-center justify-between">
                 <div>
                   <h3 className="text-white font-black text-2xl tracking-tight">{(filterFrom || filterTo) ? "Filtreli" : "Tüm"} Yükler</h3>
-                  <p className="text-slate-400 text-sm font-medium">{realLoads.length} aktif ilan</p>
+                  <p className="text-slate-400 text-sm font-medium">{loads.length} aktif ilan</p>
                 </div>
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-500/10 border border-green-500/20 backdrop-blur-md">
                   <span className="relative flex h-2.5 w-2.5"><span className="animate-ping absolute h-full w-full rounded-full bg-green-400 opacity-75" /><span className="relative h-2.5 w-2.5 rounded-full bg-green-500" /></span>
