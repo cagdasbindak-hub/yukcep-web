@@ -171,6 +171,39 @@ export const fetchBidsForLoadApi = async (loadId) => {
   return unwrap(res, "Failed to fetch bids");
 };
 
+export const fetchBidsForLoadViaRestApi = async ({ loadId, timeoutMs = 12000 }) => {
+  const headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+  };
+
+  const bidsRows = await fetchJsonWithTimeout({
+    url: `${SUPABASE_URL}/rest/v1/bids?select=id,load_id,driver_id,price,status,created_at,updated_at&load_id=eq.${loadId}&order=created_at.desc`,
+    headers,
+    timeoutMs,
+  });
+  const bids = mapBidsWithOptionalUpdatedAt(Array.isArray(bidsRows) ? bidsRows : []);
+  if (!bids.length) return [];
+
+  const driverIds = [...new Set(bids.map((row) => row.driver_id).filter(Boolean))];
+  let profileMap = new Map();
+  if (driverIds.length) {
+    const profileRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/profiles?select=id,full_name,avatar_url,rating,phone,role&id=in.(${driverIds.join(",")})`,
+      headers,
+      timeoutMs,
+    });
+    if (Array.isArray(profileRows)) {
+      profileMap = buildProfileMap(profileRows);
+    }
+  }
+
+  return bids.map((bid) => ({
+    ...bid,
+    driver: profileMap.get(bid.driver_id) || null,
+  }));
+};
+
 export const fetchLoadDetailsApi = async (loadId) => {
   const loadRes = await supabase
     .from("loads")

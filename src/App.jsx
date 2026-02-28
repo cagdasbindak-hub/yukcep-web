@@ -10,6 +10,7 @@ import {
   ensureProfileApi,
   fetchDriverFeedApi,
   fetchBidsForLoadApi,
+  fetchBidsForLoadViaRestApi,
   fetchEmployerFeedApi,
   fetchLoadDetailsApi,
   fetchLoadDetailsViaRestApi,
@@ -686,10 +687,26 @@ export default function App() {
   const fetchBidsForLoad = async (loadId) => {
     if (!loadId) return;
     try {
-      const data = await fetchBidsForLoadApi(loadId);
+      let data = null;
+      try {
+        data = await withTimeout(
+          fetchBidsForLoadApi(loadId),
+          10000,
+          "Teklif listesi sorgusu zaman aşımına uğradı (10sn)."
+        );
+      } catch (primaryError) {
+        appendRuntimeLog("warn", "BIDS_SUPABASE_FAIL", primaryError?.message || "Bids supabase failed");
+        data = await withTimeout(
+          fetchBidsForLoadViaRestApi({ loadId, timeoutMs: 12000 }),
+          13000,
+          "Teklif listesi fallback zaman aşımına uğradı (13sn)."
+        );
+        appendRuntimeLog("info", "BIDS_REST_OK", `load=${loadId} rows=${(data || []).length}`);
+      }
       setLoadBids(data || []);
     } catch (error) {
       console.error("Error fetching bids:", error);
+      appendRuntimeLog("error", "BIDS_FETCH_FAIL", error?.message || "Bids fetch failed");
     }
   };
 

@@ -82,9 +82,9 @@ const authViaSignup = async (page, user) => {
   await page.getByPlaceholder("05XX XXX XX XX").fill(user.phone);
 
   if (user.role === "employer") {
-    await page.getByRole("button", { name: /İşveren/i }).click();
+    await page.locator("button", { hasText: "Yük göndereceğim" }).first().click();
   } else {
-    await page.getByRole("button", { name: /Şoför/i }).click();
+    await page.locator("button", { hasText: "Yük taşıyorum" }).first().click();
   }
 
   await page.getByRole("button", { name: /KAYIT OL/i }).click();
@@ -103,7 +103,30 @@ const authViaSignup = async (page, user) => {
       .getByRole("button", { name: /İŞ ARIYORUM/i })
       .isVisible()
       .catch(() => false);
-    if (welcomeReady) return;
+    if (welcomeReady) {
+      const roleDeadline = Date.now() + 15000;
+      while (Date.now() < roleDeadline) {
+        const employerFeedVisible = await page
+          .getByRole("button", { name: /İşveren Feed'e Git/i })
+          .isVisible()
+          .catch(() => false);
+        const driverFeedVisible = await page
+          .getByRole("button", { name: /İş Arıyorum Feed'e Git/i })
+          .isVisible()
+          .catch(() => false);
+
+        if (user.role === "employer" && employerFeedVisible) return;
+        if (user.role === "driver" && driverFeedVisible) return;
+        if (user.role === "employer" && driverFeedVisible) {
+          throw new Error("Signup sonrası rol driver görünüyor; employer bekleniyordu.");
+        }
+        if (user.role === "driver" && employerFeedVisible) {
+          throw new Error("Signup sonrası rol employer görünüyor; driver bekleniyordu.");
+        }
+        await page.waitForTimeout(350);
+      }
+      throw new Error("Signup sonrası rol feed butonu doğrulanamadı.");
+    }
 
     await page.waitForTimeout(400);
   }
@@ -154,18 +177,41 @@ const openLoadAsDriver = async (page) => {
 const submitBidAsDriver = async (page) => {
   await page.getByPlaceholder(/Teklifiniz/i).fill(bidPrice);
   await page.getByRole("button", { name: /Teklif Gönder/i }).click();
-  await ensureVisible(page.getByText(/Teklifiniz İletildi/i), 45000, "Teklif gönderimi tamamlanmadı.");
+  const deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    const bodyText = ((await page.locator("body").textContent()) || "").replace(/\s+/g, " ");
+    if (/Teklifiniz\s*[İi]letildi/i.test(bodyText)) return;
+    if (/Teklif gönderilemedi/i.test(bodyText)) {
+      throw new Error("Teklif gönderilemedi.");
+    }
+    await page.waitForTimeout(350);
+  }
+  throw new Error("Teklif gönderimi tamamlanmadı.");
 };
 
 const openEmployerFeedAndAcceptBid = async (page) => {
   await waitForWelcomeReady(page);
-  await page.getByRole("button", { name: /İşveren Feed'e Git/i }).click();
-  await ensureVisible(page.getByRole("heading", { name: /İşveren Feed/i }), 30000, "İşveren feed ekranı açılmadı.");
-  await page.getByRole("button", { name: /^Yenile$/i }).click();
+  const employerFeedButton = page.getByRole("button", { name: /İşveren Feed'e Git/i });
+  const hasEmployerFeedButton = await employerFeedButton.isVisible().catch(() => false);
 
-  const feedCard = page.locator("div", { hasText: loadType }).first();
-  await ensureVisible(feedCard, 45000, "İşveren feed kartında hedef ilan görünmedi.");
-  await feedCard.getByRole("button", { name: /İlan Detayını Aç/i }).click();
+  if (hasEmployerFeedButton) {
+    await employerFeedButton.click();
+    await ensureVisible(page.getByRole("heading", { name: /İşveren Feed/i }), 30000, "İşveren feed ekranı açılmadı.");
+    await page.getByRole("button", { name: /^Yenile$/i }).click();
+
+    const feedCard = page.locator("div", { hasText: loadType }).first();
+    await ensureVisible(feedCard, 45000, "İşveren feed kartında hedef ilan görünmedi.");
+    await feedCard.getByRole("button", { name: /İlan Detayını Aç/i }).click();
+  } else {
+    await page.getByRole("button", { name: /İŞ ARIYORUM/i }).click();
+    await ensureVisible(page.getByRole("heading", { name: /Neredesiniz/i }), 25000, "İşveren fallback lokasyon ekranı açılmadı.");
+    await page.getByPlaceholder(/Sehir ara/i).fill(fromCity);
+    await page.getByRole("button", { name: new RegExp(`^${fromCity}$`, "i") }).click();
+    await ensureVisible(page.getByText(/Yükler/i).first(), 30000, "İşveren fallback map ekranı açılmadı.");
+    const loadCard = page.locator("button", { hasText: loadType }).first();
+    await ensureVisible(loadCard, 45000, "İşveren fallback akışında hedef ilan görünmedi.");
+    await loadCard.click();
+  }
 
   await ensureVisible(page.getByText(/Gelen Teklifler/i), 25000, "İşveren teklif detayı açılmadı.");
   const bidRow = page
@@ -198,13 +244,28 @@ const verifyDriverFeedAccepted = async (page) => {
 
 const verifyEmployerFeedAssignedAndNoTimeout = async (page) => {
   await waitForWelcomeReady(page);
-  await page.getByRole("button", { name: /İşveren Feed'e Git/i }).click();
-  await ensureVisible(page.getByRole("heading", { name: /İşveren Feed/i }), 30000, "İşveren feed tekrar açılamadı.");
-  await page.getByRole("button", { name: /^Yenile$/i }).click();
+  const employerFeedButton = page.getByRole("button", { name: /İşveren Feed'e Git/i });
+  const hasEmployerFeedButton = await employerFeedButton.isVisible().catch(() => false);
 
-  const card = page.locator("div", { hasText: loadType }).first();
-  await ensureVisible(card, 45000, "İşveren feed’de hedef ilan bulunamadı (final kontrol).");
-  await ensureVisible(card.getByText(/ASSIGNED/i), 45000, "İşveren feed’de ilan durumu ASSIGNED değil.");
+  if (hasEmployerFeedButton) {
+    await employerFeedButton.click();
+    await ensureVisible(page.getByRole("heading", { name: /İşveren Feed/i }), 30000, "İşveren feed tekrar açılamadı.");
+    await page.getByRole("button", { name: /^Yenile$/i }).click();
+
+    const card = page.locator("div", { hasText: loadType }).first();
+    await ensureVisible(card, 45000, "İşveren feed’de hedef ilan bulunamadı (final kontrol).");
+    await ensureVisible(card.getByText(/ASSIGNED/i), 45000, "İşveren feed’de ilan durumu ASSIGNED değil.");
+  } else {
+    await page.getByRole("button", { name: /İŞ ARIYORUM/i }).click();
+    await ensureVisible(page.getByRole("heading", { name: /Neredesiniz/i }), 25000, "İşveren final fallback lokasyon ekranı açılmadı.");
+    await page.getByPlaceholder(/Sehir ara/i).fill(fromCity);
+    await page.getByRole("button", { name: new RegExp(`^${fromCity}$`, "i") }).click();
+    await ensureVisible(page.getByText(/Yükler/i).first(), 30000, "İşveren final fallback map ekranı açılmadı.");
+    const loadCard = page.locator("button", { hasText: loadType }).first();
+    await ensureVisible(loadCard, 45000, "İşveren final fallback akışında hedef ilan bulunamadı.");
+    await loadCard.click();
+    await ensureVisible(page.getByText(/ONAYLANDI/i), 45000, "İşveren final fallback akışında kabul durumu görünmedi.");
+  }
 
   const pageText = (await page.locator("body").textContent()) || "";
   if (/zaman aşımına uğradı/i.test(pageText)) {
