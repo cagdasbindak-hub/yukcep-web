@@ -126,12 +126,29 @@ export const fetchBidsForLoadApi = async (loadId) => {
 };
 
 export const fetchLoadDetailsApi = async (loadId) => {
-  const res = await supabase
+  const loadRes = await supabase
     .from("loads")
-    .select("*, profiles:employer_id(*)")
+    .select("*")
     .eq("id", loadId)
     .single();
-  return unwrap(res, "Failed to fetch load details");
+  const load = unwrap(loadRes, "Failed to fetch load details");
+
+  let profile = null;
+  if (load?.employer_id) {
+    const profileRes = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", load.employer_id)
+      .maybeSingle();
+    if (!profileRes.error) {
+      profile = profileRes.data || null;
+    }
+  }
+
+  return {
+    ...load,
+    profiles: profile,
+  };
 };
 
 export const fetchLoadDetailsViaRestApi = async ({ loadId, timeoutMs = 12000 }) => {
@@ -231,7 +248,7 @@ export const createNotificationApi = async ({ userId, actorId, message }) => {
 export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => {
   let query = supabase
     .from("loads")
-    .select("*, profiles:employer_id(*)")
+    .select("*")
     .order("created_at", { ascending: false });
 
   // Trailer tipi net bir enum oldugu icin DB tarafinda filtrelenebilir.
@@ -239,20 +256,41 @@ export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => 
 
   const res = await query;
   const data = unwrap(res, "Failed to fetch loads").filter((load) => isActiveLoadStatus(load.status));
+  const employerIds = [...new Set(data.map((row) => row?.employer_id).filter(Boolean))];
+  let profileMap = new Map();
+  if (employerIds.length) {
+    const profileRes = await supabase
+      .from("profiles")
+      .select("id, full_name, avatar_url, phone, role")
+      .in("id", employerIds);
+    if (!profileRes.error && Array.isArray(profileRes.data)) {
+      profileMap = buildProfileMap(profileRes.data);
+    }
+  }
 
   const fromKey = normalizeCityKey(filterFrom);
   const toKey = normalizeCityKey(filterTo);
 
-  if (!fromKey && !toKey) return data;
+  if (!fromKey && !toKey) {
+    return data.map((load) => ({
+      ...load,
+      profiles: profileMap.get(load.employer_id) || null,
+    }));
+  }
 
   // Sehir adlarinda olasi karakter/case farklari nedeniyle istemci tarafinda normalize filtre.
-  return data.filter((load) => {
-    const originKey = normalizeCityKey(load.origin_city);
-    const destinationKey = normalizeCityKey(load.destination_city);
-    if (fromKey && originKey !== fromKey) return false;
-    if (toKey && destinationKey !== toKey) return false;
-    return true;
-  });
+  return data
+    .filter((load) => {
+      const originKey = normalizeCityKey(load.origin_city);
+      const destinationKey = normalizeCityKey(load.destination_city);
+      if (fromKey && originKey !== fromKey) return false;
+      if (toKey && destinationKey !== toKey) return false;
+      return true;
+    })
+    .map((load) => ({
+      ...load,
+      profiles: profileMap.get(load.employer_id) || null,
+    }));
 };
 
 export const fetchLoadsViaRestApi = async ({
