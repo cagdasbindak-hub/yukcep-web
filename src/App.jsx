@@ -691,16 +691,24 @@ export default function App() {
     appendRuntimeLog("info", "POST_LOAD_STARTED", `${empForm.from} -> ${empForm.to} | ${empForm.type}`);
     setIsPostingLoad(true);
     try {
-      const sessionResult = await withTimeout(
-        supabase.auth.getSession(),
-        8000,
-        "Oturum doğrulama zaman aşımına uğradı (8sn)."
-      );
-      const activeSession = sessionResult?.data?.session;
-      if (!activeSession?.user?.id || activeSession.user.id !== user.id) {
-        throw new Error("Oturum geçersiz. Lütfen çıkış yapıp tekrar giriş yapın.");
+      // Session check should never block publishing. If it times out, continue and let DB decide.
+      try {
+        const sessionResult = await withTimeout(
+          supabase.auth.getSession(),
+          5000,
+          "Oturum kontrolü yavaş yanıt verdi."
+        );
+        const activeSession = sessionResult?.data?.session;
+        if (!activeSession?.user?.id) {
+          appendRuntimeLog("warn", "POST_LOAD_SESSION_EMPTY", "Session boş görünüyor, publish denenecek.");
+        } else if (activeSession.user.id !== user.id) {
+          appendRuntimeLog("warn", "POST_LOAD_SESSION_MISMATCH", `session=${activeSession.user.id} ui=${user.id}`);
+        } else {
+          appendRuntimeLog("info", "POST_LOAD_SESSION_OK", `user=${activeSession.user.id}`);
+        }
+      } catch (sessionCheckError) {
+        appendRuntimeLog("warn", "POST_LOAD_SESSION_CHECK_SKIPPED", sessionCheckError?.message || "Session check timeout");
       }
-      appendRuntimeLog("info", "POST_LOAD_SESSION_OK", `user=${activeSession.user.id}`);
 
       const loadData = {
         origin_city: empForm.from,
@@ -731,13 +739,23 @@ export default function App() {
       } catch (firstError) {
         const firstMessage = (firstError?.cause?.message || firstError?.message || "").toLowerCase();
         const isTimeout = firstMessage.includes("zaman aşımına uğradı");
+        const isAuthError =
+          firstMessage.includes("jwt") ||
+          firstMessage.includes("unauthorized") ||
+          firstMessage.includes("permission denied") ||
+          firstMessage.includes("row-level security") ||
+          firstMessage.includes("not authenticated") ||
+          firstMessage.includes("401") ||
+          firstMessage.includes("403");
         const mightNeedProfileRepair =
           firstMessage.includes("foreign key") ||
           firstMessage.includes("profiles") ||
           firstMessage.includes("employer_id") ||
           firstMessage.includes("violates");
 
-        if (mightNeedProfileRepair) {
+        if (isAuthError) {
+          throw new Error("Oturum yetkisi geçersiz. Lütfen çıkış yapıp tekrar giriş yapın.");
+        } else if (mightNeedProfileRepair) {
           appendRuntimeLog("warn", "POST_LOAD_PROFILE_REPAIR", firstMessage || "Profil satiri dogrulanip yeniden denenecek.");
 
           const ensuredProfile = await withTimeout(
@@ -772,11 +790,15 @@ export default function App() {
       setTimeout(() => setShowConfetti(false), 100);
       setEmpForm({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
       setFormErrors({});
-      await withTimeout(
-        Promise.all([fetchLoads(), fetchPublicStats()]),
-        12000,
-        "Liste yenileme zaman aşımına uğradı (12sn)."
-      );
+      try {
+        await withTimeout(
+          Promise.all([fetchLoads(), fetchPublicStats()]),
+          12000,
+          "Liste yenileme zaman aşımına uğradı (12sn)."
+        );
+      } catch (refreshError) {
+        appendRuntimeLog("warn", "POST_LOAD_REFRESH_WARN", refreshError?.message || "Refresh timeout");
+      }
       setFilterFrom(loadData.origin_city);
       setFilterTo("");
       setFilterTrailer("");
