@@ -58,7 +58,7 @@ const releaseUpdates = [
   { date: "2026-02-28", title: "İlan listesi canlı güncelleme (insert/update/delete) ile senkronlandı." },
   { date: "2026-02-28", title: "Şehir filtrelerinde Türkçe karakter/case normalizasyonu eklendi." },
   { date: "2026-02-28", title: "Detaylı Türkiye haritası ve il bazlı nokta gösterimi eklendi." },
-  { date: "2026-02-28", title: "Neredesiniz ekranına 81 il arama + dropdown + harf gruplama eklendi." },
+  { date: "2026-02-28", title: "Neredesiniz ekranına 81 il arama + harf gruplama eklendi." },
   { date: "2026-02-28", title: "İlan verdikten sonra liste otomatik yenileme iyileştirildi." },
   { date: "2026-02-28", title: "Yük detay ekranında teklif akışı iyileştirildi." },
   { date: "2026-02-28", title: "Bildirimler gerçek zamanlı dinleme ile anlık hale getirildi." },
@@ -900,7 +900,7 @@ export default function App() {
           {screen === "location" && (
             <div className="p-5 pb-20">
               <h2 className="text-white text-3xl font-black mb-2 tracking-tight">📍 Neredesiniz?</h2>
-              <p className="text-slate-400 text-base mb-4">81 il arasından arayarak veya dropdown ile şehir seçin.</p>
+              <p className="text-slate-400 text-base mb-4">81 il arasından yazarak filtreleyip şehir seçin.</p>
 
               <div className="space-y-3 mb-4">
                 <input
@@ -910,16 +910,6 @@ export default function App() {
                   placeholder="Sehir ara... (Ornek: Istanbul, Erzurum)"
                   className="w-full py-3 px-4 rounded-xl bg-slate-900 border border-slate-700 text-white font-semibold placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 />
-                <select
-                  value=""
-                  onChange={(e) => handleLocationSelect(e.target.value)}
-                  className="w-full py-3 px-4 rounded-xl bg-slate-900 border border-slate-700 text-white font-semibold focus:outline-none focus:border-blue-500"
-                >
-                  <option value="">Dropdown ile il secin...</option>
-                  {cities.map((c) => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
               </div>
 
               <div className="max-h-[440px] overflow-y-auto pr-1 space-y-4">
