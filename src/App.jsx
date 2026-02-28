@@ -1,17 +1,31 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { MessageSquare, MapPin, Truck, RefreshCw, Calendar, Package, ArrowLeft, AlertCircle, CheckCircle, LogOut, User, Bell } from 'lucide-react';
 import { supabase } from './lib/supabase';
+import {
+  createBidApi,
+  createLoadApi,
+  createNotificationApi,
+  fetchBidsForLoadApi,
+  fetchLoadDetailsApi,
+  fetchLoadsApi,
+  fetchMyBidForLoadApi,
+  fetchNotificationsApi,
+  fetchProfileById,
+  markNotificationReadApi,
+  updateBidStatusApi,
+} from './lib/api';
+import { mapDbToUi } from './lib/loadMapper';
 import AuthScreen from './components/AuthScreen';
 import SplashScreen from './components/SplashScreen';
 import Confetti from './components/Confetti';
 import TurkeyHeatmap from './components/TurkeyHeatmap';
 import SkeletonLoadCard from './components/SkeletonLoadCard';
+import './App.css';
 
 // ─── DATA ───
 const cities = ["İstanbul", "Ankara", "İzmir", "Bursa", "Antalya", "Adana", "Konya", "Gaziantep", "Mersin", "Kayseri", "Trabzon", "Samsun"];
 const dorseTypes = [{ k: "Kapalı", icon: "📦", color: "#3b82f6" }, { k: "Açık", icon: "🚛", color: "#f59e0b" }, { k: "Frigorifik", icon: "❄️", color: "#06b6d4" }];
 const fmt = n => n.toLocaleString("tr-TR");
-const days = ["Pzt", "Sal", "Çar", "Per", "Cum"];
 
 const deliveryPoints = {
   "Ankara": { name: "Sincan OSB Depo", avgHours: 3, rating: 4.2, reviews: [{ driver: "Veli K.", stars: 4, text: "Boşaltma 3 saat sürdü, fena değil.", date: "2g önce" }, { driver: "Ahmet R.", stars: 3, text: "Rampada 1 saat bekledik.", date: "5g önce" }] },
@@ -35,30 +49,6 @@ const empReviews = {
   "default": { ratings: { speed: 3.5, payment: 3.5, comm: 3.5 }, reviews: [{ driver: "Şoför", stars: 4, text: "Memnunum.", date: "1h", resp: null }] }
 };
 const getER = name => empReviews[name] || empReviews["default"];
-
-const allLoads = [
-  { id: 1, x: 22, y: 28, price: 15000, from: "İstanbul", to: "Ankara", type: "Tekstil", trailer: "Kapalı", distance: "450 km", weight: "12 ton", urgent: false, daysOld: 1, employer: "Aras Tekstil Ltd.", kdv: true, fleet: false },
-  { id: 2, x: 55, y: 18, price: 22500, from: "İstanbul", to: "Trabzon", type: "Elektronik", trailer: "Kapalı", distance: "1.070 km", weight: "8 ton", urgent: true, daysOld: 0, employer: "TeknoPlus A.Ş.", kdv: true, fleet: false },
-  { id: 3, x: 68, y: 52, price: 18000, from: "Ankara", to: "Antalya", type: "Gıda", trailer: "Frigorifik", distance: "480 km", weight: "15 ton", urgent: false, daysOld: 2, employer: "Güney Gıda Paz.", kdv: false, fleet: false },
-  { id: 4, x: 38, y: 58, price: 28500, from: "Ankara", to: "Gaziantep", type: "İnşaat Mlz.", trailer: "Açık", distance: "700 km", weight: "22 ton", urgent: true, daysOld: 0, employer: "Mega İnşaat A.Ş.", kdv: true, fleet: false },
-  { id: 5, x: 80, y: 35, price: 13500, from: "Konya", to: "Mersin", type: "Tahıl", trailer: "Kapalı", distance: "360 km", weight: "18 ton", urgent: false, daysOld: 3, employer: "Aras Tekstil Ltd.", kdv: false, fleet: false },
-  { id: 6, x: 15, y: 48, price: 19500, from: "İzmir", to: "Bursa", type: "Otomotiv", trailer: "Açık", distance: "320 km", weight: "10 ton", urgent: false, daysOld: 1, employer: "TeknoPlus A.Ş.", kdv: true, fleet: false },
-  { id: 7, x: 45, y: 40, price: 32000, from: "İstanbul", to: "Gaziantep", type: "Makine", trailer: "Açık", distance: "1.130 km", weight: "25 ton", urgent: true, daysOld: 0, employer: "Mega İnşaat A.Ş.", kdv: true, fleet: false },
-];
-
-const fleetJobs = [
-  { id: 101, employer: "TeknoPlus A.Ş.", title: "Pazartesi — 10 TIR, İstanbul → Ankara", trucks: 10, route: "İstanbul → Ankara", date: "Pazartesi", pricePerTruck: 16000, type: "Elektronik", trailer: "Kapalı", status: "Açık", bids: 3, kdv: true },
-  { id: 102, employer: "Mega İnşaat A.Ş.", title: "Çarşamba — 5 TIR, Ankara → Gaziantep", trucks: 5, route: "Ankara → Gaziantep", date: "Çarşamba", pricePerTruck: 30000, type: "İnşaat Mlz.", trailer: "Açık", status: "Açık", bids: 1, kdv: true },
-  { id: 103, employer: "Güney Gıda Paz.", title: "Cuma — 8 TIR, Mersin → İstanbul", trucks: 8, route: "Mersin → İstanbul", date: "Cuma", pricePerTruck: 24000, type: "Gıda", trailer: "Frigorifik", status: "2/8 Dolu", bids: 5, kdv: false },
-];
-
-const calendarData = [
-  { day: "Pzt", load: "İst → Ank", price: "15.000₺", status: "Bağlandı", color: "#22c55e" },
-  { day: "Sal", load: "—", price: "", status: "Boş", color: "#94a3b8" },
-  { day: "Çar", load: "Ank → G.Antep", price: "28.500₺", status: "Bağlandı", color: "#22c55e" },
-  { day: "Per", load: "—", price: "", status: "Boş", color: "#94a3b8" },
-  { day: "Cum", load: "Mersin → İst", price: "23.500₺", status: "Bekliyor", color: "#f59e0b" },
-];
 
 // ─── SMALL COMPONENTS ───
 const TrailerBadge = ({ type, big }) => {
@@ -219,12 +209,24 @@ export default function App() {
   const [loadBids, setLoadBids] = useState([]);
   const [isProcessingBid, setIsProcessingBid] = useState(false);
 
+  const fetchNotifications = useCallback(async () => {
+    if (!user) return;
+    try {
+      const data = await fetchNotificationsApi(user.id);
+      setNotifications(data);
+      const unread = data.filter((n) => !n.is_read).length;
+      setUnreadCount(unread);
+    } catch (error) {
+      console.error("Error fetching notifications:", error);
+    }
+  }, [user]);
+
   // NOTIFICATION & BIDDING HOOKS
   useEffect(() => {
     if (user) {
       // 1. Initial Fetch
       fetchNotifications();
-      
+
       // 2. Realtime Subscription
       const channel = supabase
         .channel('public:notifications')
@@ -239,7 +241,7 @@ export default function App() {
           }
         )
         .subscribe();
-      
+
       return () => {
         supabase.removeChannel(channel);
       };
@@ -247,60 +249,36 @@ export default function App() {
       setNotifications([]);
       setUnreadCount(0);
     }
-  }, [user]);
-
-  const fetchNotifications = async () => {
-    if (!user) return;
-    const { data, error } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-      .limit(20);
-
-    if (error) {
-      console.error("Error fetching notifications:", error);
-      return;
-    }
-
-    if (data) {
-      setNotifications(data);
-      const unread = data.filter((n) => !n.is_read).length;
-      setUnreadCount(unread);
-    }
-  };
+  }, [user, fetchNotifications]);
 
   const markNotificationRead = async (id) => {
-    // Optimistic Update
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
-    );
-    setUnreadCount((prev) => Math.max(0, prev - 1));
+    const wasUnread = notifications.find((n) => n.id === id)?.is_read === false;
+    const previousNotifications = notifications;
+    const previousUnreadCount = unreadCount;
 
-    // Backend Update
-    await supabase.from('notifications').update({ is_read: true }).eq('id', id);
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, is_read: true } : n)));
+    if (wasUnread) {
+      setUnreadCount((prev) => Math.max(0, prev - 1));
+    }
+
+    try {
+      await markNotificationReadApi(id);
+    } catch (error) {
+      console.error("Error marking notification read:", error);
+      setNotifications(previousNotifications);
+      setUnreadCount(previousUnreadCount);
+      showToast("Bildirim güncellenemedi", "error");
+    }
   };
 
   const fetchBidsForLoad = async (loadId) => {
     if (!loadId) return;
-    const { data, error } = await supabase
-      .from('bids')
-      .select(`
-        *,
-        driver:driver_id (
-          full_name,
-          avatar_url,
-          rating
-        )
-      `)
-      .eq('load_id', loadId)
-      .order('created_at', { ascending: false });
-
-    if (error) {
+    try {
+      const data = await fetchBidsForLoadApi(loadId);
+      setLoadBids(data || []);
+    } catch (error) {
       console.error("Error fetching bids:", error);
-      return;
     }
-    setLoadBids(data || []);
   };
 
   const handleToggleNotification = () => {
@@ -340,11 +318,7 @@ export default function App() {
     
     // 3. Fetch full details including employer profile
     try {
-      const { data, error } = await supabase
-        .from('loads')
-        .select('*, profiles:employer_id(*)')
-        .eq('id', loadId)
-        .single();
+      const data = await fetchLoadDetailsApi(loadId);
         
       if (data) {
         // Merge Supabase data with UI mapping logic
@@ -368,12 +342,7 @@ export default function App() {
             fetchBidsForLoad(loadId);
           } else {
             // Check if I already bid
-            const { data: myBid } = await supabase
-              .from('bids')
-              .select('*')
-              .eq('load_id', loadId)
-              .eq('driver_id', user.id)
-              .maybeSingle();
+            const myBid = await fetchMyBidForLoadApi(loadId, user.id);
             
             if (myBid) {
               setHasBid(true);
@@ -400,25 +369,18 @@ export default function App() {
 
     try {
       // 1. Insert Bid
-      const { data: bidData, error: bidError } = await supabase
-        .from('bids')
-        .insert([{
-          load_id: selectedLoadDetail.id,
-          driver_id: user.id,
-          price: price,
-          status: 'PENDING'
-        }])
-        .select()
-        .single();
-
-      if (bidError) throw bidError;
+      await createBidApi({
+        loadId: selectedLoadDetail.id,
+        driverId: user.id,
+        price,
+      });
 
       // 2. Notify Employer
-      await supabase.from('notifications').insert([{
-        user_id: selectedLoadDetail.raw.employer_id,
+      await createNotificationApi({
+        userId: selectedLoadDetail.raw.employer_id,
+        actorId: user.id,
         message: `Yeni Teklif: ${profile?.full_name || 'Bir şoför'} ilanınıza ${price}₺ teklif verdi.`,
-        is_read: false
-      }]);
+      });
 
       setHasBid(true);
       showToast(`✅ Teklifiniz İletildi: ${price}₺`);
@@ -434,22 +396,21 @@ export default function App() {
   };
 
   const respondToBid = async (bidId, driverId, action) => { // action: 'ACCEPTED' | 'REJECTED'
+    if (!user) {
+      showToast("Oturum bulunamadı", "error");
+      return;
+    }
     try {
       // 1. Update Bid
-      const { error } = await supabase
-        .from('bids')
-        .update({ status: action })
-        .eq('id', bidId);
-
-      if (error) throw error;
+      await updateBidStatusApi({ bidId, status: action });
 
       // 2. Notify Driver
       const statusText = action === 'ACCEPTED' ? 'KABUL EDİLDİ ✅' : 'REDDEDİLDİ ❌';
-      await supabase.from('notifications').insert([{
-        user_id: driverId,
+      await createNotificationApi({
+        userId: driverId,
+        actorId: user.id,
         message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanı için teklifiniz güncellendi.`,
-        is_read: false
-      }]);
+      });
 
       // Update local state
       setLoadBids(prev => prev.map(b => b.id === bidId ? { ...b, status: action } : b));
@@ -477,15 +438,9 @@ export default function App() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
         setUser(session.user);
-        // Fetch profile
-        supabase
-          .from("profiles")
-          .select("*")
-          .eq("id", session.user.id)
-          .single()
-          .then(({ data }) => {
-            if (data) setProfile(data);
-          });
+        fetchProfileById(session.user.id)
+          .then((data) => setProfile(data))
+          .catch((error) => console.error("Profile fetch on mount failed:", error));
       }
     });
 
@@ -494,12 +449,12 @@ export default function App() {
       async (event, session) => {
         if (session?.user) {
           setUser(session.user);
-          const { data } = await supabase
-            .from("profiles")
-            .select("*")
-            .eq("id", session.user.id)
-            .single();
-          if (data) setProfile(data);
+          try {
+            const data = await fetchProfileById(session.user.id);
+            if (data) setProfile(data);
+          } catch (error) {
+            console.error("Profile fetch on auth change failed:", error);
+          }
         } else {
           setUser(null);
           setProfile(null);
@@ -552,62 +507,23 @@ export default function App() {
     if (city) setFilterFrom(city);
   }, [city]);
 
+  const fetchLoads = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const data = await fetchLoadsApi({ filterFrom, filterTo, filterTrailer });
+      const mappedLoads = data.map((l) => mapDbToUi(l));
+      setRealLoads(mappedLoads);
+    } catch (error) {
+      console.error('Error fetching loads:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [filterFrom, filterTo, filterTrailer]);
+
   // Fetch Loads from Supabase
   useEffect(() => {
     fetchLoads();
-  }, [filterFrom, filterTo, filterTrailer]);
-
-  const fetchLoads = async () => {
-    setIsLoading(true);
-    let query = supabase
-      .from('loads')
-      .select('*, profiles:employer_id(*)')
-      .order('created_at', { ascending: false });
-
-    if (filterFrom) query = query.eq('origin_city', filterFrom);
-    if (filterTo) query = query.eq('destination_city', filterTo);
-    if (filterTrailer) query = query.eq('trailer_type', filterTrailer);
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('Error fetching loads:', error);
-      setIsLoading(false);
-      return;
-    }
-
-    if (data) {
-      const mappedLoads = data.map(l => {
-        const uiLoad = mapDbToUi(l);
-        // Enrich with profile data if available
-        if (l.profiles) {
-          uiLoad.employer = l.profiles.full_name || "Anonim";
-          uiLoad.employerAvatar = l.profiles.avatar_url;
-        }
-        return uiLoad;
-      });
-      setRealLoads(mappedLoads);
-    }
-    setIsLoading(false);
-  };
-
-  const mapDbToUi = (dbLoad) => ({
-    id: dbLoad.id,
-    from: dbLoad.origin_city,
-    to: dbLoad.destination_city,
-    price: dbLoad.price,
-    type: dbLoad.load_type,
-    trailer: dbLoad.trailer_type,
-    distance: dbLoad.distance_km ? `${dbLoad.distance_km} km` : "N/A",
-    weight: dbLoad.weight_kg ? `${dbLoad.weight_kg / 1000} ton` : "N/A", // simple conv
-    urgent: dbLoad.is_urgent,
-    daysOld: Math.floor((new Date() - new Date(dbLoad.created_at)) / (1000 * 60 * 60 * 24)), // dynamic calculation
-    employer: "İşveren", // Placeholder as profiles join is needed
-    kdv: dbLoad.kdv_included, // Assuming kdv_included field in DB
-    fleet: dbLoad.is_fleet,
-    x: Math.random() * 80 + 10, // Mock coordinates for map
-    y: Math.random() * 60 + 10
-  });
+  }, [fetchLoads]);
 
   // Form Validation
   const validateForm = () => {
@@ -624,6 +540,12 @@ export default function App() {
 
   const handlePostLoad = async () => {
     if (validateForm()) {
+      if (!user) {
+        showToast("İlan vermek için giriş yapmalısınız.", "error");
+        nav("auth");
+        return;
+      }
+
       // Basic formatting
       const loadData = {
         origin_city: empForm.from,
@@ -631,29 +553,26 @@ export default function App() {
         load_type: empForm.type,
         trailer_type: empForm.trailer,
         price: parseFloat(empForm.price) || 0,
+        kdv_included: empForm.kdv,
         weight_kg: 10000, // Placeholder or add input
         is_urgent: false, // Placeholder or add input
         is_fleet: empForm.fleet,
-        truck_count: empForm.fleet ? empForm.trucks : 1,
+        truck_count: empForm.fleet ? Number(empForm.trucks) || 1 : 1,
         pickup_date: new Date().toISOString().split('T')[0], // Today
+        employer_id: user.id,
       };
 
-      // Link load to logged-in user
-      if (user) {
-        loadData.employer_id = user.id;
-      }
-
       // Try insert
-      const { error } = await supabase.from('loads').insert([loadData]);
-
-      if (error) {
-        console.error("Insert error:", error);
-        showToast(`❌ Hata: ${error.message}`, "error");
-      } else {
+      try {
+        await createLoadApi(loadData);
         showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
-        setShowConfetti(true); setTimeout(() => setShowConfetti(false), 100);
+        setShowConfetti(true);
+        setTimeout(() => setShowConfetti(false), 100);
         setEmpForm({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
         setFormErrors({});
+      } catch (error) {
+        console.error("Insert error:", error);
+        showToast(`❌ Hata: ${error.message}`, "error");
       }
     } else {
       showToast("⚠️ Lütfen eksik alanları doldurun.", "error");
@@ -684,7 +603,7 @@ export default function App() {
   const statCities = useAnimatedCount(81);
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-3 sm:p-5" style={{ background: "linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%)" }}>
+    <div className="app-shell min-h-screen flex items-center justify-center p-3 sm:p-5">
       {/* SPLASH SCREEN */}
       {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
 
@@ -693,18 +612,18 @@ export default function App() {
 
       {/* TOAST */}
       {toast && (
-        <div className={`fixed top-5 left-1/2 -translate-x-1/2 z-[100] px-6 py-4 rounded-2xl font-bold text-sm shadow-2xl animate-bounce flex items-center gap-3 ${toastType === 'error' ? 'bg-red-500 text-white' : 'bg-emerald-500 text-white'}`}>
+        <div className={`yc-toast fixed top-5 left-1/2 -translate-x-1/2 z-[100] px-6 py-4 rounded-2xl font-bold text-sm shadow-2xl animate-bounce flex items-center gap-3 ${toastType === 'error' ? 'bg-red-500 text-white' : 'bg-emerald-500 text-white'}`}>
           {toastType === 'error' ? <AlertCircle size={20} /> : <CheckCircle size={20} />}
           {toast}
         </div>
       )}
 
       {/* PHONE FRAME - Mobile First Optimized */}
-      <div className="relative w-full bg-slate-900 rounded-[2rem] sm:rounded-[2.5rem] overflow-hidden border border-slate-700/50 flex flex-col shadow-2xl" style={{ maxWidth: "430px", height: "85vh", maxHeight: "820px" }}>
+      <div className="device-frame relative w-full rounded-[2rem] sm:rounded-[2.5rem] overflow-hidden flex flex-col shadow-2xl" style={{ maxWidth: "430px", height: "85vh", maxHeight: "820px" }}>
 
         {/* ═══════════════════ HEADER BAR ═══════════════════ */}
         {screen !== "welcome" && screen !== "auth" && (
-          <div className="flex items-center justify-between px-5 py-4 bg-slate-800/80 backdrop-blur-sm border-b border-slate-700/50 z-20 sticky top-0">
+          <div className="topbar-grad flex items-center justify-between px-5 py-4 backdrop-blur-sm border-b border-slate-700/50 z-20 sticky top-0">
             <button
               onClick={() => nav(prevScreen === "employer" ? "employer" : screen === "map" ? "location" : screen === "location" ? "welcome" : screen === "employer" ? "welcome" : screen === "fleet" ? "map" : screen === "calendar" ? "map" : screen === "auth" ? "welcome" : "welcome")}
               className="p-2 -ml-2 rounded-full hover:bg-white/10 transition-all text-slate-300 hover:text-white"
@@ -727,7 +646,7 @@ export default function App() {
           {screen === "welcome" && (
             <div className="flex flex-col min-h-full">
               {/* ─── COMPACT TOP NAV BAR ─── */}
-              <div className="flex items-center justify-between px-5 py-4 bg-slate-800/80 backdrop-blur-sm border-b border-slate-700/50">
+              <div className="topbar-grad flex items-center justify-between px-5 py-4 backdrop-blur-sm border-b border-slate-700/50">
                 <div className="flex items-center gap-2.5">
                   <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}>
                     <span className="text-2xl">🚚</span>
@@ -792,7 +711,7 @@ export default function App() {
                       {/* Profile Card Dropdown */}
                       {showProfileCard && (
                         <div className="absolute right-0 top-12 w-72 rounded-3xl bg-slate-900/90 backdrop-blur-xl border border-slate-700/50 shadow-2xl z-50 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 ring-1 ring-white/10">
-                          <div className="p-5 bg-gradient-to-br from-blue-600/20 to-purple-600/20 border-b border-slate-700/50 relative overflow-hidden">
+                          <div className="p-5 bg-gradient-to-br from-blue-600/20 to-cyan-500/20 border-b border-slate-700/50 relative overflow-hidden">
                             <div className="absolute inset-0 bg-white/5 opacity-50 blur-3xl -z-10" />
                             <div className="flex items-center gap-4">
                               <div className="relative">
@@ -1576,7 +1495,11 @@ export default function App() {
         )}
 
         {/* SUPPORT FAB - Always Visible */}
-        <button onClick={() => setChatOpen(!chatOpen)} className="absolute bottom-5 right-5 w-14 h-14 rounded-full flex items-center justify-center z-40 active:scale-90 transition-all shadow-lg hover:shadow-blue-500/40" style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}>
+        <div className="absolute bottom-5 left-5 z-30 px-3 py-2 rounded-xl bg-slate-900/85 border border-cyan-500/40 text-cyan-300 text-xs font-bold shadow-lg backdrop-blur-md">
+          Tamam simdi bu is Codex in ellerinde
+        </div>
+
+        <button onClick={() => setChatOpen(!chatOpen)} className="floating-fab absolute bottom-5 right-5 w-14 h-14 rounded-full flex items-center justify-center z-40 active:scale-90 transition-all shadow-lg hover:shadow-blue-500/40" style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}>
           <span className="text-2xl drop-shadow-md">{chatOpen ? "✕" : <MessageSquare size={26} className="fill-white/20" />}</span>
           {!chatOpen && <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center border-2 border-slate-900 animate-bounce">1</span>}
         </button>

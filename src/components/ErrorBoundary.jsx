@@ -1,5 +1,7 @@
 import React from 'react';
 
+const IS_DEV = import.meta.env.DEV;
+
 class ErrorBoundary extends React.Component {
     constructor(props) {
         super(props);
@@ -26,11 +28,13 @@ class ErrorBoundary extends React.Component {
                         <p className="text-slate-400 text-sm mb-4">
                             Uygulama beklenmedik bir hatayla karşılaştı. Lütfen sayfayı yenileyin.
                         </p>
-                        <div className="bg-slate-900/50 p-3 rounded-lg text-left mb-4 overflow-auto max-h-32">
-                            <code className="text-red-400 text-xs font-mono">
-                                {this.state.error && this.state.error.toString()}
-                            </code>
-                        </div>
+                        {IS_DEV && (
+                            <div className="bg-slate-900/50 p-3 rounded-lg text-left mb-4 overflow-auto max-h-32">
+                                <code className="text-red-400 text-xs font-mono">
+                                    {this.state.error && this.state.error.toString()}
+                                </code>
+                            </div>
+                        )}
                         <button
                             onClick={() => window.location.reload()}
                             className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all"

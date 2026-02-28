@@ -1,16 +1,46 @@
-# React + Vite
+# YukCep Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+YukCep is a logistics marketplace web app built with React, Vite, Tailwind v4, and Supabase.
 
-Currently, two official plugins are available:
+## Runtime Requirements
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- Node.js: `^20.19.0 || >=22.12.0`
+- npm: latest stable recommended
 
-## React Compiler
+The project also includes an `.nvmrc` file (`20.19.0`) for predictable local setup.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Environment Variables
 
-## Expanding the ESLint configuration
+Create `.env` from `.env.example`:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+```
+
+The app fails fast on startup if these variables are missing.
+
+## Scripts
+
+- `npm install` - install dependencies
+- `npm run dev` - start development server
+- `npm run build` - production build
+- `npm run lint` - eslint
+- `npm run preview` - preview production build
+
+## Database
+
+The canonical schema is in [`schema.sql`](./schema.sql) and includes:
+
+- `profiles`
+- `loads`
+- `bids`
+- `notifications`
+- Row-Level Security (RLS) policies matching frontend behavior
+
+Apply the schema in your Supabase SQL editor before using authenticated flows.
+
+## Notes
+
+- Keep `.env` out of version control.
+- Use `.env.example` as the only committed env template.

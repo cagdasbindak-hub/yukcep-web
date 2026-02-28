@@ -19,6 +19,20 @@ const CITY_COORDS = {
 // Better Turkey outline path
 const TURKEY_PATH = "M15,20 Q18,16 22,15 Q26,13 30,14 Q34,13 38,14 Q42,13 46,14 Q50,12 54,13 Q58,11 62,12 Q66,13 70,14 Q74,14 76,16 Q78,17 76,20 Q74,22 72,24 Q70,26 68,28 Q66,30 64,32 Q62,34 58,36 Q54,38 50,38 Q46,38 42,37 Q38,36 34,38 Q30,38 26,36 Q22,34 20,32 Q18,30 16,28 Q14,26 14,24 Q14,22 15,20Z";
 
+const hashString = (value) => {
+  let hash = 0;
+  const str = String(value ?? "");
+  for (let i = 0; i < str.length; i += 1) {
+    hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+};
+
+const stableOffset = (seed, amplitude) => {
+  const normalized = (hashString(seed) / 0xffffffff) * 2 - 1;
+  return normalized * amplitude;
+};
+
 function getHeatColor(count) {
   if (count >= 3) return { fill: "#ef4444", glow: "#ef444480", label: "Yoğun" };
   if (count >= 2) return { fill: "#f59e0b", glow: "#f59e0b60", label: "Orta" };
@@ -45,10 +59,11 @@ export default function TurkeyHeatmap({ loads, onCityClick, selectedLoad, onLoad
     return loads.map((l) => {
       const fromCoord = CITY_COORDS[l.from] || { x: 45, y: 25 };
       const toCoord = CITY_COORDS[l.to] || { x: 45, y: 25 };
+      const seedBase = `${l.id}-${l.from}-${l.to}`;
       return {
         ...l,
-        mapX: (fromCoord.x + toCoord.x) / 2 + (Math.random() - 0.5) * 4,
-        mapY: (fromCoord.y + toCoord.y) / 2 + (Math.random() - 0.5) * 3,
+        mapX: (fromCoord.x + toCoord.x) / 2 + stableOffset(`${seedBase}:x`, 2),
+        mapY: (fromCoord.y + toCoord.y) / 2 + stableOffset(`${seedBase}:y`, 1.5),
       };
     });
   }, [loads]);

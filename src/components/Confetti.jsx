@@ -1,36 +1,43 @@
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 
 const COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#a855f7", "#06b6d4", "#ec4899", "#fbbf24"];
 const SHAPES = ["square", "circle", "triangle"];
 
-function randomBetween(a, b) {
-  return Math.random() * (b - a) + a;
-}
+const hashString = (value) => {
+  let hash = 0;
+  const str = String(value ?? "");
+  for (let i = 0; i < str.length; i += 1) {
+    hash = (hash * 33 + str.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+};
+
+const seededBetween = (seed, min, max) => {
+  const normalized = hashString(seed) / 0xffffffff;
+  return min + normalized * (max - min);
+};
 
 export default function Confetti({ active, duration = 3000 }) {
-  const [pieces, setPieces] = useState([]);
+  const pieces = useMemo(() => {
+    if (!active) return [];
 
-  useEffect(() => {
-    if (!active) return;
+    const minAnim = Math.max(1.2, duration / 2600);
+    const maxAnim = Math.max(2.4, duration / 1200);
 
-    const newPieces = Array.from({ length: 60 }, (_, i) => ({
+    return Array.from({ length: 60 }, (_, i) => ({
       id: i,
-      left: randomBetween(5, 95),
-      color: COLORS[Math.floor(Math.random() * COLORS.length)],
-      shape: SHAPES[Math.floor(Math.random() * SHAPES.length)],
-      size: randomBetween(6, 12),
-      animDuration: randomBetween(1.5, 3.5),
-      delay: randomBetween(0, 0.5),
-      rotation: randomBetween(0, 360),
-      drift: randomBetween(-40, 40),
+      left: seededBetween(`${duration}-${i}-left`, 5, 95),
+      color: COLORS[hashString(`${duration}-${i}-color`) % COLORS.length],
+      shape: SHAPES[hashString(`${duration}-${i}-shape`) % SHAPES.length],
+      size: seededBetween(`${duration}-${i}-size`, 6, 12),
+      animDuration: seededBetween(`${duration}-${i}-anim`, minAnim, maxAnim),
+      delay: seededBetween(`${duration}-${i}-delay`, 0, 0.5),
+      rotation: seededBetween(`${duration}-${i}-rotation`, 0, 360),
+      drift: seededBetween(`${duration}-${i}-drift`, -40, 40),
     }));
-    setPieces(newPieces);
-
-    const timer = setTimeout(() => setPieces([]), duration);
-    return () => clearTimeout(timer);
   }, [active, duration]);
 
-  if (pieces.length === 0) return null;
+  if (!active || pieces.length === 0) return null;
 
   return (
     <>
