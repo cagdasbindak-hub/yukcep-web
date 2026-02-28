@@ -82,6 +82,52 @@ const buildProfileMap = (rows = []) => {
   return map;
 };
 
+const mapBidsWithOptionalUpdatedAt = (rows = []) =>
+  rows.map((row) => ({
+    ...row,
+    updated_at: row?.updated_at || row?.created_at || null,
+  }));
+
+const buildBidsQueryWithProjection = ({ projection, userId, loadIds }) => {
+  let query = supabase.from("bids").select(projection).order("created_at", { ascending: false });
+  if (userId) query = query.eq("driver_id", userId);
+  if (Array.isArray(loadIds)) {
+    if (!loadIds.length) return null;
+    query = query.in("load_id", loadIds);
+  }
+  return query;
+};
+
+const fetchBidsWithOptionalUpdatedAt = async ({ userId, loadIds, context }) => {
+  const withUpdatedAt = buildBidsQueryWithProjection({
+    projection: "id, load_id, driver_id, price, status, created_at, updated_at",
+    userId,
+    loadIds,
+  });
+  if (!withUpdatedAt) return [];
+  const first = await withUpdatedAt;
+  if (!first.error) {
+    return mapBidsWithOptionalUpdatedAt(first.data || []);
+  }
+
+  const message = String(first.error?.message || "").toLowerCase();
+  if (message.includes("updated_at")) {
+    const fallback = buildBidsQueryWithProjection({
+      projection: "id, load_id, driver_id, price, status, created_at",
+      userId,
+      loadIds,
+    });
+    if (!fallback) return [];
+    const second = await fallback;
+    const data = unwrap(second, context);
+    return mapBidsWithOptionalUpdatedAt(data || []);
+  }
+
+  const err = new Error(`${context}: ${first.error.message}`);
+  err.cause = first.error;
+  throw err;
+};
+
 export const fetchProfileById = async (userId) => {
   const res = await supabase.from("profiles").select("*").eq("id", userId).single();
   return unwrap(res, "Failed to fetch profile");
@@ -204,29 +250,71 @@ export const fetchMyBidForLoadApi = async (loadId, userId) => {
 };
 
 export const createBidApi = async ({ loadId, driverId, price }) => {
-  const res = await supabase
+  const payload = {
+    load_id: loadId,
+    driver_id: driverId,
+    price,
+    status: "PENDING",
+    updated_at: new Date().toISOString(),
+  };
+
+  const first = await supabase
     .from("bids")
-    .insert([
-      {
-        load_id: loadId,
-        driver_id: driverId,
-        price,
-        status: "PENDING",
-      },
-    ])
+    .insert([payload])
     .select()
     .single();
-  return unwrap(res, "Failed to submit bid");
+  if (!first.error) {
+    return first.data;
+  }
+
+  const message = String(first.error?.message || "").toLowerCase();
+  if (message.includes("updated_at")) {
+    const { updated_at, ...fallbackPayload } = payload;
+    const retry = await supabase.from("bids").insert([fallbackPayload]).select().single();
+    return unwrap(retry, "Failed to submit bid");
+  }
+
+  return unwrap(first, "Failed to submit bid");
 };
 
 export const updateBidStatusApi = async ({ bidId, status }) => {
-  const res = await supabase
+  const payload = {
+    status,
+    updated_at: new Date().toISOString(),
+  };
+
+  const first = await supabase
     .from("bids")
-    .update({ status })
+    .update(payload)
     .eq("id", bidId)
+    .select("id, status, updated_at")
+    .single();
+  if (!first.error) {
+    return first.data;
+  }
+
+  const message = String(first.error?.message || "").toLowerCase();
+  if (message.includes("updated_at")) {
+    const retry = await supabase
+      .from("bids")
+      .update({ status })
+      .eq("id", bidId)
+      .select("id, status")
+      .single();
+    return unwrap(retry, "Failed to update bid");
+  }
+
+  return unwrap(first, "Failed to update bid");
+};
+
+export const updateLoadStatusApi = async ({ loadId, status }) => {
+  const res = await supabase
+    .from("loads")
+    .update({ status })
+    .eq("id", loadId)
     .select("id, status")
     .single();
-  return unwrap(res, "Failed to update bid");
+  return unwrap(res, "Failed to update load status");
 };
 
 export const createNotificationApi = async ({ userId, actorId, message }) => {
@@ -520,6 +608,132 @@ export const fetchPublicStatsViaRestApi = async ({ timeoutMs = 12000 } = {}) => 
     activeDrivers,
     activeCities: citySet.size,
   };
+};
+
+export const fetchDriverFeedApi = async ({ userId }) => {
+  const bids = await fetchBidsWithOptionalUpdatedAt({
+    userId,
+    context: "Failed to fetch driver feed bids",
+  });
+
+  if (!bids.length) return [];
+
+  const loadIds = [...new Set(bids.map((row) => row.load_id).filter(Boolean))];
+  const loadsRes = await supabase
+    .from("loads")
+    .select("id, employer_id, origin_city, destination_city, pickup_date, load_type, trailer_type, price, currency, status, created_at")
+    .in("id", loadIds);
+  const loads = unwrap(loadsRes, "Failed to fetch driver feed loads");
+  const loadMap = new Map(loads.map((row) => [row.id, row]));
+
+  const employerIds = [...new Set(loads.map((row) => row.employer_id).filter(Boolean))];
+  let profileMap = new Map();
+  if (employerIds.length) {
+    const profileRes = await supabase
+      .from("profiles")
+      .select("id, full_name, phone, avatar_url, role")
+      .in("id", employerIds);
+    if (!profileRes.error && Array.isArray(profileRes.data)) {
+      profileMap = buildProfileMap(profileRes.data);
+    }
+  }
+
+  return bids.map((bid) => {
+    const load = loadMap.get(bid.load_id) || {};
+    const employer = profileMap.get(load.employer_id) || null;
+    return {
+      bid_id: bid.id,
+      bid_status: bid.status,
+      bid_price: bid.price,
+      bid_created_at: bid.created_at,
+      bid_updated_at: bid.updated_at,
+      load_id: bid.load_id,
+      origin_city: load.origin_city || "-",
+      destination_city: load.destination_city || "-",
+      pickup_date: load.pickup_date || null,
+      load_type: load.load_type || "-",
+      trailer_type: load.trailer_type || "-",
+      load_price: load.price || 0,
+      currency: load.currency || "TRY",
+      load_status: load.status || "open",
+      employer_id: load.employer_id || null,
+      employer_name: employer?.full_name || "İşveren",
+      employer_phone: employer?.phone || null,
+      employer_avatar: employer?.avatar_url || null,
+      employer_role: employer?.role || "employer",
+      load_created_at: load.created_at || null,
+    };
+  });
+};
+
+export const fetchEmployerFeedApi = async ({ userId }) => {
+  const loadsRes = await supabase
+    .from("loads")
+    .select("id, employer_id, origin_city, destination_city, pickup_date, load_type, trailer_type, price, currency, status, created_at")
+    .eq("employer_id", userId)
+    .order("created_at", { ascending: false });
+  const loads = unwrap(loadsRes, "Failed to fetch employer feed loads");
+
+  if (!loads.length) return [];
+
+  const loadIds = loads.map((row) => row.id);
+  const bids = await fetchBidsWithOptionalUpdatedAt({
+    loadIds,
+    context: "Failed to fetch employer feed bids",
+  });
+
+  const driverIds = [...new Set(bids.map((row) => row.driver_id).filter(Boolean))];
+  let driverMap = new Map();
+  if (driverIds.length) {
+    const profileRes = await supabase
+      .from("profiles")
+      .select("id, full_name, phone, avatar_url, role")
+      .in("id", driverIds);
+    if (!profileRes.error && Array.isArray(profileRes.data)) {
+      driverMap = buildProfileMap(profileRes.data);
+    }
+  }
+
+  const bidsByLoad = bids.reduce((acc, bid) => {
+    if (!acc[bid.load_id]) acc[bid.load_id] = [];
+    const driver = driverMap.get(bid.driver_id) || null;
+    acc[bid.load_id].push({
+      bid_id: bid.id,
+      driver_id: bid.driver_id,
+      driver_name: driver?.full_name || "Şoför",
+      driver_phone: driver?.phone || null,
+      driver_avatar: driver?.avatar_url || null,
+      driver_role: driver?.role || "driver",
+      bid_status: bid.status,
+      bid_price: bid.price,
+      bid_created_at: bid.created_at,
+      bid_updated_at: bid.updated_at,
+    });
+    return acc;
+  }, {});
+
+  return loads.map((load) => {
+    const loadBids = (bidsByLoad[load.id] || []).sort(
+      (a, b) => new Date(b.bid_created_at).getTime() - new Date(a.bid_created_at).getTime()
+    );
+    return {
+      load_id: load.id,
+      origin_city: load.origin_city,
+      destination_city: load.destination_city,
+      pickup_date: load.pickup_date,
+      load_type: load.load_type,
+      trailer_type: load.trailer_type,
+      load_price: load.price,
+      currency: load.currency || "TRY",
+      load_status: load.status || "open",
+      load_created_at: load.created_at,
+      bids: loadBids,
+      bid_count: loadBids.length,
+      pending_count: loadBids.filter((x) => x.bid_status === "PENDING").length,
+      accepted_count: loadBids.filter((x) => x.bid_status === "ACCEPTED").length,
+      rejected_count: loadBids.filter((x) => x.bid_status === "REJECTED").length,
+    };
+  });
 };
 
 export const insertRuntimeLogsApi = async ({ logs }) => {

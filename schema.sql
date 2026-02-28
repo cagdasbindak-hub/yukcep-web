@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS public.bids (
   price NUMERIC(12,2) NOT NULL CHECK (price > 0),
   status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
   UNIQUE(load_id, driver_id)
 );
 
@@ -78,6 +79,9 @@ ALTER TABLE IF EXISTS public.profiles
 
 ALTER TABLE IF EXISTS public.loads
   ADD COLUMN IF NOT EXISTS kdv_included BOOLEAN NOT NULL DEFAULT true;
+
+ALTER TABLE IF EXISTS public.bids
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());
 
 ALTER TABLE IF EXISTS public.notifications
   ADD COLUMN IF NOT EXISTS actor_id UUID;

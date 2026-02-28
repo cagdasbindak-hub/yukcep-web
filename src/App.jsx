@@ -7,7 +7,9 @@ import {
   createLoadViaRestApi,
   createNotificationApi,
   ensureProfileApi,
+  fetchDriverFeedApi,
   fetchBidsForLoadApi,
+  fetchEmployerFeedApi,
   fetchLoadDetailsApi,
   fetchLoadDetailsViaRestApi,
   fetchLoadsApi,
@@ -19,6 +21,7 @@ import {
   fetchProfileById,
   insertRuntimeLogsApi,
   markNotificationReadApi,
+  updateLoadStatusApi,
   updateBidStatusApi,
 } from './lib/api';
 import { mapDbToUi } from './lib/loadMapper';
@@ -59,6 +62,8 @@ const empReviews = {
 const getER = name => empReviews[name] || empReviews["default"];
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-02-28", title: "Şoför ve işveren için ayrı Feed ekranları eklendi." },
+  { date: "2026-02-28", title: "10 adımlı E2E senaryo checklist ekranı feed içine eklendi." },
   { date: "2026-02-28", title: "Profil menüsüne açılır Ayarlar paneli (hazır/placeholder) eklendi." },
   { date: "2026-02-28", title: "Çıkış Yap akışı timeout + local fallback ile güvenilir hale getirildi." },
   { date: "2026-02-28", title: "Profil kartında rol etiketi netleştirildi: İşverenim / İş Arıyorum." },
@@ -288,6 +293,10 @@ export default function App() {
   const [showProfileCard, setShowProfileCard] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [selectedLoadDetail, setSelectedLoadDetail] = useState(null);
+  const [driverFeedItems, setDriverFeedItems] = useState([]);
+  const [employerFeedItems, setEmployerFeedItems] = useState([]);
+  const [isFeedLoading, setIsFeedLoading] = useState(false);
+  const [feedError, setFeedError] = useState("");
 
   // NOTIFICATIONS
   const [notifications, setNotifications] = useState([]);
@@ -653,6 +662,18 @@ export default function App() {
     }
   }, [user, fetchNotifications]);
 
+  useEffect(() => {
+    if (!user || notifications.length === 0) return;
+    const latestMessage = String(notifications[0]?.message || "").toLocaleLowerCase("tr-TR");
+    if (screen === "driverFeed" && /(kabul edildi|reddedildi|başka teklif kabul edildi)/i.test(latestMessage)) {
+      loadDriverFeed();
+      return;
+    }
+    if (screen === "employerFeed" && /yeni teklif/i.test(latestMessage)) {
+      loadEmployerFeed();
+    }
+  }, [loadDriverFeed, loadEmployerFeed, notifications, screen, user]);
+
   const markNotificationRead = async (id) => {
     const wasUnread = notifications.find((n) => n.id === id)?.is_read === false;
     const previousNotifications = notifications;
@@ -703,6 +724,15 @@ export default function App() {
     setScreenKey(k => k + 1); // trigger page transition
   }, [screen]);
 
+  const resolveBackScreen = useCallback(() => {
+    if (screen === "map") return "location";
+    if (screen === "location") return "welcome";
+    if (screen === "employer") return "welcome";
+    if (screen === "fleet" || screen === "calendar") return "map";
+    if (screen === "driverFeed" || screen === "employerFeed") return "welcome";
+    return prevScreen === "employer" ? "employer" : "welcome";
+  }, [prevScreen, screen]);
+
   const handleLocationSelect = useCallback((selectedCity) => {
     if (!selectedCity) return;
     setFilterFrom(selectedCity);
@@ -712,6 +742,46 @@ export default function App() {
     setLocationQuery("");
     nav("map");
   }, [nav]);
+
+  const loadDriverFeed = useCallback(async () => {
+    if (!user) return;
+    setIsFeedLoading(true);
+    setFeedError("");
+    try {
+      const feed = await withTimeout(
+        fetchDriverFeedApi({ userId: user.id }),
+        12000,
+        "Şoför feed sorgusu zaman aşımına uğradı (12sn)."
+      );
+      setDriverFeedItems(feed || []);
+      appendRuntimeLog("info", "DRIVER_FEED_OK", `rows=${(feed || []).length}`);
+    } catch (error) {
+      setFeedError(error?.message || "Şoför feed alınamadı.");
+      appendRuntimeLog("error", "DRIVER_FEED_FAIL", error?.message || "Driver feed failed");
+    } finally {
+      setIsFeedLoading(false);
+    }
+  }, [appendRuntimeLog, user, withTimeout]);
+
+  const loadEmployerFeed = useCallback(async () => {
+    if (!user) return;
+    setIsFeedLoading(true);
+    setFeedError("");
+    try {
+      const feed = await withTimeout(
+        fetchEmployerFeedApi({ userId: user.id }),
+        12000,
+        "İşveren feed sorgusu zaman aşımına uğradı (12sn)."
+      );
+      setEmployerFeedItems(feed || []);
+      appendRuntimeLog("info", "EMPLOYER_FEED_OK", `rows=${(feed || []).length}`);
+    } catch (error) {
+      setFeedError(error?.message || "İşveren feed alınamadı.");
+      appendRuntimeLog("error", "EMPLOYER_FEED_FAIL", error?.message || "Employer feed failed");
+    } finally {
+      setIsFeedLoading(false);
+    }
+  }, [appendRuntimeLog, user, withTimeout]);
 
   const handleLoadClick = async (loadId) => {
     // 1. Find basic load info from local state for immediate feedback
@@ -823,12 +893,17 @@ export default function App() {
       });
 
       setHasBid(true);
+      appendRuntimeLog("info", "BID_SUBMIT_OK", `load=${selectedLoadDetail.id} price=${price}`);
       showToast(`✅ Teklifiniz İletildi: ${price}₺`);
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 2000);
+      if (screen === "driverFeed") {
+        loadDriverFeed();
+      }
 
     } catch (e) {
       console.error("Error submitting bid:", e);
+      appendRuntimeLog("error", "BID_SUBMIT_FAIL", e?.message || "Bid submit failed");
       showToast("Teklif gönderilemedi", "error");
     } finally {
       setIsProcessingBid(false);
@@ -841,6 +916,10 @@ export default function App() {
       return;
     }
     try {
+      const pickupDateText = selectedLoadDetail?.raw?.pickup_date
+        ? formatDateOnly(selectedLoadDetail.raw.pickup_date)
+        : "Belirlenecek";
+
       // 1. Update Bid
       await updateBidStatusApi({ bidId, status: action });
 
@@ -849,15 +928,42 @@ export default function App() {
       await createNotificationApi({
         userId: driverId,
         actorId: user.id,
-        message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanı için teklifiniz güncellendi.`,
+        message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to}. Yükleme: ${pickupDateText}.`,
       });
 
+      if (action === "ACCEPTED") {
+        // Keep marketplace consistent: accepted offer closes load and rejects pending alternatives.
+        await updateLoadStatusApi({ loadId: selectedLoadDetail.id, status: "assigned" });
+        const pendingOthers = loadBids.filter((bid) => bid.id !== bidId && bid.status === "PENDING");
+        for (const otherBid of pendingOthers) {
+          await updateBidStatusApi({ bidId: otherBid.id, status: "REJECTED" });
+          await createNotificationApi({
+            userId: otherBid.driver_id,
+            actorId: user.id,
+            message: `Bilgi: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanında başka teklif kabul edildi.`,
+          });
+        }
+      }
+
       // Update local state
-      setLoadBids(prev => prev.map(b => b.id === bidId ? { ...b, status: action } : b));
+      setLoadBids((prev) =>
+        prev.map((bid) => {
+          if (bid.id === bidId) return { ...bid, status: action };
+          if (action === "ACCEPTED" && bid.status === "PENDING") return { ...bid, status: "REJECTED" };
+          return bid;
+        })
+      );
+      appendRuntimeLog("info", "BID_DECISION_OK", `bid=${bidId} action=${action}`);
       showToast(`Teklif ${action === 'ACCEPTED' ? 'kabul' : 'red'} edildi.`);
+      fetchLoads();
+      fetchPublicStats();
+      if (screen === "employerFeed") {
+        loadEmployerFeed();
+      }
 
     } catch (e) {
       console.error("Error responding to bid:", e);
+      appendRuntimeLog("error", "BID_DECISION_FAIL", e?.message || "Bid decision failed");
       showToast("İşlem başarısız", "error");
     }
   };
@@ -964,6 +1070,53 @@ export default function App() {
   };
 
   const getProfileRoleLabel = (role) => (role === "employer" ? "İşverenim" : "İş Arıyorum");
+  const formatDateTime = (value) => {
+    if (!value) return "Belirsiz";
+    try {
+      return new Date(value).toLocaleString("tr-TR");
+    } catch {
+      return "Belirsiz";
+    }
+  };
+  const formatDateOnly = (value) => {
+    if (!value) return "Belirsiz";
+    try {
+      return new Date(value).toLocaleDateString("tr-TR");
+    } catch {
+      return "Belirsiz";
+    }
+  };
+  const getBidStatusUi = (status) => {
+    const key = String(status || "PENDING").toUpperCase();
+    if (key === "ACCEPTED") {
+      return {
+        label: "Kabul Edildi",
+        className: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+      };
+    }
+    if (key === "REJECTED") {
+      return {
+        label: "Reddedildi",
+        className: "bg-red-500/15 text-red-300 border-red-500/30",
+      };
+    }
+    return {
+      label: "Yanıt Bekleniyor",
+      className: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+    };
+  };
+
+  const openRoleFeed = useCallback(() => {
+    if (!user) {
+      nav("auth");
+      return;
+    }
+    if (profile?.role === "employer") {
+      nav("employerFeed");
+      return;
+    }
+    nav("driverFeed");
+  }, [nav, profile?.role, user]);
 
   // ─── FILTERS ───
   const [filterFrom, setFilterFrom] = useState("");
@@ -1070,6 +1223,21 @@ export default function App() {
   useEffect(() => {
     fetchPublicStats();
   }, [fetchPublicStats]);
+
+  useEffect(() => {
+    if (!user) {
+      setDriverFeedItems([]);
+      setEmployerFeedItems([]);
+      setFeedError("");
+      return;
+    }
+
+    if (screen === "driverFeed") {
+      loadDriverFeed();
+    } else if (screen === "employerFeed") {
+      loadEmployerFeed();
+    }
+  }, [loadDriverFeed, loadEmployerFeed, screen, user]);
 
   // Keep map/list in sync with new inserts/updates from any user session.
   useEffect(() => {
@@ -1323,6 +1491,38 @@ export default function App() {
 
   const loads = realLoads; // Filtering is handled in Supabase query now
 
+  const e2eChecklist = useMemo(() => {
+    const recentErrors = runtimeLogs.slice(0, 40).filter((log) => log.level === "error");
+    const driverHasDecisionNotification = notifications.some((n) =>
+      /kabul edildi|reddedildi/i.test(String(n?.message || ""))
+    );
+    const driverHasAcceptedLoad = driverFeedItems.some((item) => item.bid_status === "ACCEPTED");
+    const employerHasIncomingBids = employerFeedItems.some((item) => item.bid_count > 0);
+    const employerHasDecision = employerFeedItems.some((item) => item.accepted_count > 0 || item.rejected_count > 0);
+    const employerHasPlannedPickup = employerFeedItems.some((item) => Boolean(item.pickup_date));
+
+    const steps = [
+      { id: "S1", title: "Kullanıcı oturumu açık mı?", passed: Boolean(user?.id) },
+      { id: "S2", title: "Profil rolü çözüldü mü? (driver/employer)", passed: Boolean(profile?.role) },
+      { id: "S3", title: "Açık yük listesi yükleniyor mu?", passed: !isLoading },
+      { id: "S4", title: "Şoför teklif oluşturabiliyor mu?", passed: driverFeedItems.length > 0 },
+      { id: "S5", title: "İşveren kendi ilanına gelen teklifleri görüyor mu?", passed: employerHasIncomingBids },
+      { id: "S6", title: "İşveren teklif kabul/red aksiyonu üretiyor mu?", passed: employerHasDecision || driverHasDecisionNotification },
+      { id: "S7", title: "Şoför kabul/red bilgisini feed veya bildirimde görüyor mu?", passed: driverHasDecisionNotification || driverHasAcceptedLoad },
+      { id: "S8", title: "Kabul edilen işte yükleme tarihi görünüyor mu?", passed: driverFeedItems.some((x) => x.bid_status === "ACCEPTED" && x.pickup_date) || employerHasPlannedPickup },
+      { id: "S9", title: "Her role özel feed ekranı veri çekiyor mu?", passed: driverFeedItems.length > 0 || employerFeedItems.length > 0 },
+      { id: "S10", title: "Kritik runtime hatası var mı?", passed: recentErrors.length === 0 },
+    ];
+
+    return steps.map((step, index) => {
+      const unlocked = steps.slice(0, index).every((prev) => prev.passed);
+      return {
+        ...step,
+        state: unlocked ? (step.passed ? "pass" : "check") : "locked",
+      };
+    });
+  }, [driverFeedItems, employerFeedItems, isLoading, notifications, profile?.role, runtimeLogs, user?.id]);
+
   // animated stats
   const statLoads = useAnimatedCount(publicStats.activeLoads);
   const statDrivers = useAnimatedCount(publicStats.activeDrivers);
@@ -1351,7 +1551,7 @@ export default function App() {
         {screen !== "welcome" && screen !== "auth" && (
           <div className="topbar-grad flex items-center justify-between px-5 py-4 backdrop-blur-sm border-b border-slate-700/50 z-20 sticky top-0">
             <button
-              onClick={() => nav(prevScreen === "employer" ? "employer" : screen === "map" ? "location" : screen === "location" ? "welcome" : screen === "employer" ? "welcome" : screen === "fleet" ? "map" : screen === "calendar" ? "map" : screen === "auth" ? "welcome" : "welcome")}
+              onClick={() => nav(resolveBackScreen())}
               className="p-2 -ml-2 rounded-full hover:bg-white/10 transition-all text-slate-300 hover:text-white"
             >
               <ArrowLeft size={24} />
@@ -1470,6 +1670,18 @@ export default function App() {
                             <button
                               onClick={() => {
                                 setShowProfileCard(false);
+                                openRoleFeed();
+                              }}
+                              className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-slate-300 font-bold text-sm hover:bg-white/5 transition-all active:scale-95 group"
+                            >
+                              <span className="bg-slate-800 p-1.5 rounded-lg group-hover:bg-slate-700 transition-colors">
+                                {profile?.role === "employer" ? "📋" : "🧭"}
+                              </span>
+                              {profile?.role === "employer" ? "İşveren Feed" : "İş Arıyorum Feed"}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setShowProfileCard(false);
                                 setShowSettingsPanel(true);
                               }}
                               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-slate-300 font-bold text-sm hover:bg-white/5 transition-all active:scale-95 group"
@@ -1539,6 +1751,14 @@ export default function App() {
                     </span>
                     <p className="relative text-white/50 text-xs font-medium mt-1">Yük ilanı ver, şoför bul</p>
                   </button>
+                  {user && (
+                    <button
+                      onClick={openRoleFeed}
+                      className="w-full py-3 px-4 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 text-cyan-200 font-black text-sm active:scale-[0.98] transition-all"
+                    >
+                      {profile?.role === "employer" ? "📋 İşveren Feed'e Git" : "🧭 İş Arıyorum Feed'e Git"}
+                    </button>
+                  )}
                 </div>
 
                 {/* ─── SPACER ─── */}
@@ -1650,6 +1870,225 @@ export default function App() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {screen === "driverFeed" && (
+            <div className="p-5 pb-20">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <h2 className="text-white text-3xl font-black tracking-tight">🧭 İş Arıyorum Feed</h2>
+                  <p className="text-slate-400 text-sm mt-1">Tekliflerim, kararlar ve planlanan yükleme tarihleri.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={loadDriverFeed}
+                  className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-xs font-bold"
+                >
+                  Yenile
+                </button>
+              </div>
+
+              {feedError && (
+                <div className="mb-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
+                  <p className="text-red-300 text-xs font-bold">{feedError}</p>
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {isFeedLoading ? (
+                  <>
+                    <SkeletonLoadCard />
+                    <SkeletonLoadCard />
+                  </>
+                ) : driverFeedItems.length === 0 ? (
+                  <div className="p-5 rounded-2xl bg-slate-800/50 border border-slate-700/50 text-center">
+                    <p className="text-white font-bold">Henüz teklif geçmişi yok</p>
+                    <p className="text-slate-400 text-sm mt-1">Yük ekranından teklif verdiğinde burada görünecek.</p>
+                  </div>
+                ) : (
+                  driverFeedItems.map((item) => {
+                    const bidUi = getBidStatusUi(item.bid_status);
+                    return (
+                      <div key={`driver-feed-${item.bid_id}`} className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                          <div>
+                            <p className="text-white font-black text-lg">{item.origin_city} → {item.destination_city}</p>
+                            <p className="text-slate-400 text-xs mt-0.5">{item.load_type} · {item.trailer_type}</p>
+                          </div>
+                          <span className={`px-2 py-1 rounded-full text-[10px] font-bold border ${bidUi.className}`}>
+                            {bidUi.label}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 mb-3 text-xs">
+                          <div className="p-2 rounded-lg bg-slate-900/60 border border-slate-700/40">
+                            <p className="text-slate-500">Teklifim</p>
+                            <p className="text-emerald-300 font-black">{fmt(Number(item.bid_price || 0))} ₺</p>
+                          </div>
+                          <div className="p-2 rounded-lg bg-slate-900/60 border border-slate-700/40">
+                            <p className="text-slate-500">Yükleme Tarihi</p>
+                            <p className="text-cyan-300 font-black">{formatDateOnly(item.pickup_date)}</p>
+                          </div>
+                        </div>
+                        <div className="space-y-1.5 text-[11px] text-slate-300 mb-3">
+                          <p>1. Teklif gönderildi: <span className="text-slate-100 font-semibold">{formatDateTime(item.bid_created_at)}</span></p>
+                          <p>2. İşveren kararı: <span className="text-slate-100 font-semibold">{formatDateTime(item.bid_updated_at)}</span></p>
+                          <p>3. İşi alım tarihi: <span className="text-slate-100 font-semibold">{formatDateOnly(item.pickup_date)}</span></p>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <p className="text-[11px] text-slate-400">İşveren: <span className="text-slate-200 font-semibold">{item.employer_name}</span></p>
+                          <button
+                            type="button"
+                            onClick={() => handleLoadClick(item.load_id)}
+                            className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold"
+                          >
+                            İlanı Aç
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="mt-4 p-4 rounded-2xl bg-slate-800/40 border border-slate-700/30">
+                <p className="text-slate-200 text-sm font-black mb-2">✅ E2E Kontrol Listesi (10 Senaryo)</p>
+                <div className="space-y-2">
+                  {e2eChecklist.map((item) => (
+                    <div key={item.id} className="p-2 rounded-lg bg-slate-900/50 border border-slate-700/40">
+                      <p className="text-[11px] font-bold text-slate-200">{item.id} · {item.title}</p>
+                      <p className={`text-[10px] mt-1 font-bold ${
+                        item.state === "pass"
+                          ? "text-emerald-300"
+                          : item.state === "check"
+                            ? "text-amber-300"
+                            : "text-slate-500"
+                      }`}>
+                        {item.state === "pass" ? "GEÇTİ" : item.state === "check" ? "KONTROL BEKLİYOR" : "ÖNCEKİ ADIMLAR BEKLENİYOR"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {screen === "employerFeed" && (
+            <div className="p-5 pb-20">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <h2 className="text-white text-3xl font-black tracking-tight">📋 İşveren Feed</h2>
+                  <p className="text-slate-400 text-sm mt-1">İlanlarım, teklifler ve kabul/red karar takibi.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={loadEmployerFeed}
+                  className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-xs font-bold"
+                >
+                  Yenile
+                </button>
+              </div>
+
+              {feedError && (
+                <div className="mb-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
+                  <p className="text-red-300 text-xs font-bold">{feedError}</p>
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {isFeedLoading ? (
+                  <>
+                    <SkeletonLoadCard />
+                    <SkeletonLoadCard />
+                  </>
+                ) : employerFeedItems.length === 0 ? (
+                  <div className="p-5 rounded-2xl bg-slate-800/50 border border-slate-700/50 text-center">
+                    <p className="text-white font-bold">Henüz yayınlanmış ilan yok</p>
+                    <p className="text-slate-400 text-sm mt-1">Yeni ilan verdiğinde teklif akışını burada izleyeceksin.</p>
+                  </div>
+                ) : (
+                  employerFeedItems.map((item) => (
+                    <div key={`employer-feed-${item.load_id}`} className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                      <div className="flex items-start justify-between gap-3 mb-3">
+                        <div>
+                          <p className="text-white font-black text-lg">{item.origin_city} → {item.destination_city}</p>
+                          <p className="text-slate-400 text-xs mt-0.5">{item.load_type} · {item.trailer_type}</p>
+                        </div>
+                        <span className="px-2 py-1 rounded-full text-[10px] font-bold border bg-cyan-500/10 border-cyan-500/30 text-cyan-200">
+                          {item.load_status?.toUpperCase() || "OPEN"}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-4 gap-2 mb-3 text-[11px]">
+                        <div className="p-2 rounded-lg bg-slate-900/60 border border-slate-700/40 text-center">
+                          <p className="text-slate-500">Toplam</p>
+                          <p className="text-slate-100 font-black">{item.bid_count}</p>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-900/60 border border-slate-700/40 text-center">
+                          <p className="text-slate-500">Bekleyen</p>
+                          <p className="text-amber-300 font-black">{item.pending_count}</p>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-900/60 border border-slate-700/40 text-center">
+                          <p className="text-slate-500">Kabul</p>
+                          <p className="text-emerald-300 font-black">{item.accepted_count}</p>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-900/60 border border-slate-700/40 text-center">
+                          <p className="text-slate-500">Red</p>
+                          <p className="text-red-300 font-black">{item.rejected_count}</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5 text-[11px] text-slate-300 mb-3">
+                        <p>1. İlan yayınlandı: <span className="text-slate-100 font-semibold">{formatDateTime(item.load_created_at)}</span></p>
+                        <p>2. Yükleme tarihi: <span className="text-slate-100 font-semibold">{formatDateOnly(item.pickup_date)}</span></p>
+                        <p>3. Son durum: <span className="text-slate-100 font-semibold">{item.load_status || "open"}</span></p>
+                      </div>
+
+                      {item.bids.length > 0 && (
+                        <div className="mb-3 p-2 rounded-xl bg-slate-900/40 border border-slate-700/40">
+                          <p className="text-slate-300 text-[11px] font-bold mb-2">Son teklifler</p>
+                          <div className="space-y-1">
+                            {item.bids.slice(0, 3).map((bid) => (
+                              <div key={bid.bid_id} className="flex items-center justify-between text-[11px]">
+                                <span className="text-slate-300">{bid.driver_name}</span>
+                                <span className="text-emerald-300 font-bold">{fmt(Number(bid.bid_price || 0))} ₺</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => handleLoadClick(item.load_id)}
+                        className="w-full py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold"
+                      >
+                        İlan Detayını Aç
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="mt-4 p-4 rounded-2xl bg-slate-800/40 border border-slate-700/30">
+                <p className="text-slate-200 text-sm font-black mb-2">✅ E2E Kontrol Listesi (10 Senaryo)</p>
+                <div className="space-y-2">
+                  {e2eChecklist.map((item) => (
+                    <div key={item.id} className="p-2 rounded-lg bg-slate-900/50 border border-slate-700/40">
+                      <p className="text-[11px] font-bold text-slate-200">{item.id} · {item.title}</p>
+                      <p className={`text-[10px] mt-1 font-bold ${
+                        item.state === "pass"
+                          ? "text-emerald-300"
+                          : item.state === "check"
+                            ? "text-amber-300"
+                            : "text-slate-500"
+                      }`}>
+                        {item.state === "pass" ? "GEÇTİ" : item.state === "check" ? "KONTROL BEKLİYOR" : "ÖNCEKİ ADIMLAR BEKLENİYOR"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           )}
