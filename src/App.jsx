@@ -65,6 +65,7 @@ const releaseUpdates = [
   { date: "2026-02-28", title: "UI performansı için kart ve geçiş animasyonları optimize edildi." },
   { date: "2026-02-28", title: "Genel hata yakalama ve toast mesajları güçlendirildi." },
 ];
+const LOG_STORAGE_KEY = "yukcep_runtime_logs_v1";
 
 // ─── SMALL COMPONENTS ───
 const TrailerBadge = ({ type, big }) => {
@@ -191,6 +192,95 @@ export default function App() {
   const [loadBids, setLoadBids] = useState([]);
   const [isProcessingBid, setIsProcessingBid] = useState(false);
   const [isPostingLoad, setIsPostingLoad] = useState(false);
+  const [runtimeLogs, setRuntimeLogs] = useState([]);
+  const [showRuntimeLogs, setShowRuntimeLogs] = useState(false);
+
+  const appendRuntimeLog = useCallback((level, event, details = "") => {
+    const next = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      at: new Date().toISOString(),
+      level,
+      event,
+      details: String(details || "").slice(0, 320),
+    };
+    setRuntimeLogs((prev) => {
+      const merged = [next, ...prev].slice(0, 100);
+      try {
+        localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(merged));
+      } catch {
+        // Ignore storage quota errors.
+      }
+      return merged;
+    });
+  }, []);
+
+  const clearRuntimeLogs = useCallback(() => {
+    setRuntimeLogs([]);
+    try {
+      localStorage.removeItem(LOG_STORAGE_KEY);
+    } catch {
+      // noop
+    }
+  }, []);
+
+  const copyRuntimeLogs = useCallback(async () => {
+    if (!runtimeLogs.length) {
+      showToast("Kopyalanacak log yok.", "error");
+      return;
+    }
+    const payload = runtimeLogs
+      .slice(0, 30)
+      .map((log) => `[${new Date(log.at).toLocaleString("tr-TR")}] ${log.level.toUpperCase()} ${log.event} :: ${log.details}`)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(payload);
+      showToast("📋 Loglar panoya kopyalandı.");
+    } catch {
+      showToast("Loglar kopyalanamadı.", "error");
+    }
+  }, [runtimeLogs]);
+
+  const withTimeout = useCallback(async (promise, timeoutMs, timeoutMessage) => {
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LOG_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setRuntimeLogs(parsed.slice(0, 100));
+      }
+    } catch {
+      // ignore malformed cache
+    }
+  }, []);
+
+  useEffect(() => {
+    const onWindowError = (event) => {
+      appendRuntimeLog("error", "JS_ERROR", event?.message || "Unknown window error");
+    };
+    const onUnhandled = (event) => {
+      const reason = event?.reason?.message || String(event?.reason || "Unhandled promise rejection");
+      appendRuntimeLog("error", "UNHANDLED_PROMISE", reason);
+    };
+
+    window.addEventListener("error", onWindowError);
+    window.addEventListener("unhandledrejection", onUnhandled);
+    return () => {
+      window.removeEventListener("error", onWindowError);
+      window.removeEventListener("unhandledrejection", onUnhandled);
+    };
+  }, [appendRuntimeLog]);
 
   const fetchNotifications = useCallback(async () => {
     if (!user) return;
@@ -585,25 +675,34 @@ export default function App() {
 
   const handlePostLoad = async () => {
     if (!validateForm()) {
+      appendRuntimeLog("warn", "POST_LOAD_VALIDATION_FAIL", "Eksik veya hatali form alani.");
       showToast("⚠️ Lütfen eksik alanları doldurun.", "error");
       return;
     }
 
     if (!user) {
+      appendRuntimeLog("warn", "POST_LOAD_NO_SESSION", "Kullanici oturumu yok.");
       showToast("İlan vermek için giriş yapmalısınız.", "error");
       nav("auth");
       return;
     }
 
+    const startTs = Date.now();
+    appendRuntimeLog("info", "POST_LOAD_STARTED", `${empForm.from} -> ${empForm.to} | ${empForm.type}`);
     setIsPostingLoad(true);
     try {
-      const ensuredProfile = await ensureProfileApi({
-        userId: user.id,
-        email: user.email,
-        fullName: profile?.full_name || user.user_metadata?.full_name,
-        phone: profile?.phone,
-        role: profile?.role || "employer",
-      });
+      const ensuredProfile = await withTimeout(
+        ensureProfileApi({
+          userId: user.id,
+          email: user.email,
+          fullName: profile?.full_name || user.user_metadata?.full_name,
+          phone: profile?.phone,
+          role: profile?.role || "employer",
+        }),
+        15000,
+        "Profil kontrolü zaman aşımına uğradı (15sn)."
+      );
+      appendRuntimeLog("info", "POST_LOAD_PROFILE_READY", `role=${ensuredProfile?.role || "unknown"}`);
       setProfile(ensuredProfile);
 
       const loadData = {
@@ -623,24 +722,35 @@ export default function App() {
         currency: "TRY",
       };
 
-      await createLoadApi(loadData);
+      await withTimeout(
+        createLoadApi(loadData),
+        15000,
+        "İlan oluşturma zaman aşımına uğradı (15sn)."
+      );
       showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 100);
       setEmpForm({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
       setFormErrors({});
-      await Promise.all([fetchLoads(), fetchPublicStats()]);
+      await withTimeout(
+        Promise.all([fetchLoads(), fetchPublicStats()]),
+        12000,
+        "Liste yenileme zaman aşımına uğradı (12sn)."
+      );
       setFilterFrom(loadData.origin_city);
       setFilterTo("");
       setFilterTrailer("");
       setCity(loadData.origin_city);
       nav("map");
+      appendRuntimeLog("info", "POST_LOAD_SUCCESS", `ilan_yayin_suresi_ms=${Date.now() - startTs}`);
     } catch (error) {
       console.error("Insert error:", error);
       const backendMessage = error?.cause?.message || error?.message || "İlan eklenemedi.";
+      appendRuntimeLog("error", "POST_LOAD_FAILED", backendMessage);
       showToast(`❌ Hata: ${backendMessage}`, "error");
     } finally {
       setIsPostingLoad(false);
+      appendRuntimeLog("info", "POST_LOAD_FINISHED", `isPostingLoad=false | elapsed_ms=${Date.now() - startTs}`);
     }
   };
 
@@ -891,6 +1001,55 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+                </div>
+
+                {/* ─── RUNTIME ERROR LOG ─── */}
+                <div className="mt-3 p-4 rounded-2xl bg-slate-800/40 border border-slate-700/30">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-slate-200 text-sm font-black">🐞 Hata/Çalışma Logları</p>
+                    <button
+                      type="button"
+                      onClick={() => setShowRuntimeLogs((prev) => !prev)}
+                      className="text-[10px] px-2 py-1 rounded-md bg-slate-900 border border-slate-700 text-slate-300 font-bold"
+                    >
+                      {showRuntimeLogs ? "Gizle" : "Goster"}
+                    </button>
+                  </div>
+                  {showRuntimeLogs && (
+                    <>
+                      <div className="flex items-center gap-2 mb-2">
+                        <button
+                          type="button"
+                          onClick={copyRuntimeLogs}
+                          className="text-[10px] px-2 py-1 rounded-md bg-blue-500/15 border border-blue-500/30 text-blue-300 font-bold"
+                        >
+                          Kopyala
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearRuntimeLogs}
+                          className="text-[10px] px-2 py-1 rounded-md bg-red-500/10 border border-red-500/30 text-red-300 font-bold"
+                        >
+                          Temizle
+                        </button>
+                      </div>
+                      <div className="max-h-44 overflow-y-auto pr-1 space-y-2">
+                        {runtimeLogs.length === 0 ? (
+                          <p className="text-slate-500 text-xs">Henuz log yok.</p>
+                        ) : (
+                          runtimeLogs.slice(0, 10).map((log) => (
+                            <div key={log.id} className="p-2 rounded-lg bg-slate-900/40 border border-slate-700/30">
+                              <p className={`text-[10px] font-black ${log.level === "error" ? "text-red-300" : log.level === "warn" ? "text-amber-300" : "text-emerald-300"}`}>
+                                {log.level.toUpperCase()} · {log.event}
+                              </p>
+                              <p className="text-slate-300 text-[11px] mt-1 leading-snug">{log.details}</p>
+                              <p className="text-slate-500 text-[10px] mt-1">{new Date(log.at).toLocaleString("tr-TR")}</p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
