@@ -13,6 +13,7 @@ import {
   fetchMyBidForLoadApi,
   fetchNotificationsApi,
   fetchPublicStatsApi,
+  fetchPublicStatsViaRestApi,
   fetchProfileById,
   markNotificationReadApi,
   updateBidStatusApi,
@@ -54,8 +55,10 @@ const empReviews = {
 };
 const getER = name => empReviews[name] || empReviews["default"];
 
-const releaseUpdates = [
-  { date: "2026-02-28", title: "Ana sayfa sayaçları gerçek veriye bağlandı." },
+const RELEASE_UPDATES_SEED = [
+  { date: "2026-02-28", title: "Sayaçlar Supabase + REST + local fallback ile 0/0 bug'ına karşı güçlendirildi." },
+  { date: "2026-02-28", title: "İlan yayınlandıktan sonra liste ve sayaçlar optimistic olarak anında güncelleniyor." },
+  { date: "2026-02-28", title: "Son 10 Güncelleme paneli kalıcı (localStorage) hale getirildi." },
   { date: "2026-02-28", title: "İlan listesi canlı güncelleme (insert/update/delete) ile senkronlandı." },
   { date: "2026-02-28", title: "Şehir filtrelerinde Türkçe karakter/case normalizasyonu eklendi." },
   { date: "2026-02-28", title: "Detaylı Türkiye haritası ve il bazlı nokta gösterimi eklendi." },
@@ -63,10 +66,25 @@ const releaseUpdates = [
   { date: "2026-02-28", title: "İlan verdikten sonra liste otomatik yenileme iyileştirildi." },
   { date: "2026-02-28", title: "Yük detay ekranında teklif akışı iyileştirildi." },
   { date: "2026-02-28", title: "Bildirimler gerçek zamanlı dinleme ile anlık hale getirildi." },
-  { date: "2026-02-28", title: "UI performansı için kart ve geçiş animasyonları optimize edildi." },
-  { date: "2026-02-28", title: "Genel hata yakalama ve toast mesajları güçlendirildi." },
 ];
 const LOG_STORAGE_KEY = "yukcep_runtime_logs_v1";
+const PUBLIC_STATS_CACHE_KEY = "yukcep_public_stats_cache_v1";
+const RELEASE_UPDATES_KEY = "yukcep_release_updates_v1";
+
+const sanitizeReleaseUpdates = (items = []) => {
+  const normalized = [];
+  const seen = new Set();
+  items.forEach((item) => {
+    const title = String(item?.title || "").trim();
+    if (!title || seen.has(title)) return;
+    seen.add(title);
+    normalized.push({
+      date: String(item?.date || "2026-02-28"),
+      title,
+    });
+  });
+  return normalized.slice(0, 10);
+};
 
 const getSupabaseStorageKey = () => {
   try {
@@ -113,6 +131,18 @@ const readCachedAccessToken = () => {
   } catch {
     return null;
   }
+};
+
+const deriveStatsFromUiLoads = (uiLoads = []) => {
+  const citySet = new Set();
+  uiLoads.forEach((load) => {
+    if (load?.from) citySet.add(String(load.from).trim());
+    if (load?.to) citySet.add(String(load.to).trim());
+  });
+  return {
+    activeLoads: uiLoads.length,
+    activeCities: citySet.size,
+  };
 };
 
 // ─── SMALL COMPONENTS ───
@@ -243,6 +273,7 @@ export default function App() {
   const [postLoadError, setPostLoadError] = useState("");
   const [runtimeLogs, setRuntimeLogs] = useState([]);
   const [showRuntimeLogs, setShowRuntimeLogs] = useState(false);
+  const [releaseUpdates, setReleaseUpdates] = useState(RELEASE_UPDATES_SEED);
 
   const appendRuntimeLog = useCallback((level, event, details = "") => {
     const next = {
@@ -270,6 +301,65 @@ export default function App() {
     } catch {
       // noop
     }
+  }, []);
+
+  const persistPublicStats = useCallback((nextStats) => {
+    const sanitized = {
+      activeLoads: Number(nextStats?.activeLoads) || 0,
+      activeDrivers: Number(nextStats?.activeDrivers) || 0,
+      activeCities: Number(nextStats?.activeCities) || 0,
+    };
+    setPublicStats(sanitized);
+    try {
+      localStorage.setItem(PUBLIC_STATS_CACHE_KEY, JSON.stringify(sanitized));
+    } catch {
+      // ignore cache write failures
+    }
+    return sanitized;
+  }, []);
+
+  const persistReleaseUpdates = useCallback((nextItems) => {
+    const sanitized = sanitizeReleaseUpdates(nextItems);
+    setReleaseUpdates(sanitized);
+    try {
+      localStorage.setItem(RELEASE_UPDATES_KEY, JSON.stringify(sanitized));
+    } catch {
+      // ignore cache write failures
+    }
+    return sanitized;
+  }, []);
+
+  const applyLocalStatsFallback = useCallback((candidateLoads, options = {}) => {
+    const localDerived = deriveStatsFromUiLoads(candidateLoads);
+    setPublicStats((prev) => {
+      const prevLoads = Number(prev?.activeLoads) || 0;
+      const prevDrivers = Number(prev?.activeDrivers) || 0;
+      const prevCities = Number(prev?.activeCities) || 0;
+      const next = {
+        activeLoads: Math.max(
+          options.incrementLoads ? prevLoads + 1 : prevLoads,
+          localDerived.activeLoads,
+          prevLoads
+        ),
+        activeDrivers: prevDrivers,
+        activeCities: Math.max(prevCities, localDerived.activeCities),
+      };
+
+      if (
+        next.activeLoads === prevLoads &&
+        next.activeDrivers === prevDrivers &&
+        next.activeCities === prevCities
+      ) {
+        return prev;
+      }
+
+      try {
+        localStorage.setItem(PUBLIC_STATS_CACHE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore cache write failures
+      }
+      return next;
+    });
   }, []);
 
   const copyRuntimeLogs = useCallback(async () => {
@@ -313,6 +403,35 @@ export default function App() {
       // ignore malformed cache
     }
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PUBLIC_STATS_CACHE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (
+        parsed &&
+        typeof parsed.activeLoads === "number" &&
+        typeof parsed.activeDrivers === "number" &&
+        typeof parsed.activeCities === "number"
+      ) {
+        setPublicStats(parsed);
+      }
+    } catch {
+      // ignore malformed stats cache
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(RELEASE_UPDATES_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      const merged = sanitizeReleaseUpdates([...RELEASE_UPDATES_SEED, ...(Array.isArray(parsed) ? parsed : [])]);
+      persistReleaseUpdates(merged);
+    } catch {
+      persistReleaseUpdates(RELEASE_UPDATES_SEED);
+    }
+  }, [persistReleaseUpdates]);
 
   useEffect(() => {
     const onWindowError = (event) => {
@@ -662,12 +781,30 @@ export default function App() {
 
   const fetchPublicStats = useCallback(async () => {
     try {
-      const data = await fetchPublicStatsApi();
-      setPublicStats(data);
+      const data = await withTimeout(
+        fetchPublicStatsApi(),
+        8000,
+        "Public stats query timeout."
+      );
+      persistPublicStats(data);
+      return;
     } catch (error) {
-      console.error("Error fetching public stats:", error);
+      appendRuntimeLog("warn", "PUBLIC_STATS_SUPABASE_FAIL", error?.message || "Supabase stats failed");
     }
-  }, []);
+
+    try {
+      const restData = await fetchPublicStatsViaRestApi({ timeoutMs: 10000 });
+      appendRuntimeLog("info", "PUBLIC_STATS_REST_OK", `loads=${restData.activeLoads} drivers=${restData.activeDrivers} cities=${restData.activeCities}`);
+      persistPublicStats(restData);
+      return;
+    } catch (restError) {
+      console.error("Error fetching public stats:", restError);
+      appendRuntimeLog("warn", "PUBLIC_STATS_REST_FAIL", restError?.message || "REST stats failed");
+    }
+
+    // Local fallback: avoid 0/0 stats when visible data exists.
+    applyLocalStatsFallback(realLoads);
+  }, [appendRuntimeLog, applyLocalStatsFallback, persistPublicStats, realLoads, withTimeout]);
 
   const fetchLoads = useCallback(async () => {
     setIsLoading(true);
@@ -677,10 +814,11 @@ export default function App() {
       setRealLoads(mappedLoads);
     } catch (error) {
       console.error('Error fetching loads:', error);
+      appendRuntimeLog("warn", "LOADS_FETCH_FAIL", error?.message || "Loads fetch failed");
     } finally {
       setIsLoading(false);
     }
-  }, [filterFrom, filterTo, filterTrailer]);
+  }, [appendRuntimeLog, filterFrom, filterTo, filterTrailer]);
 
   // Fetch Loads from Supabase
   useEffect(() => {
@@ -808,8 +946,9 @@ export default function App() {
         throw new Error("Aktif oturum tokeni alınamadı. Çıkış yapıp tekrar giriş yapın.");
       }
 
+      let createdLoad = null;
       try {
-        await publishLoad(18000);
+        createdLoad = await publishLoad(18000);
       } catch (firstError) {
         const firstMessage = (firstError?.cause?.message || firstError?.message || "").toLowerCase();
         const isTimeout = firstMessage.includes("zaman aşımına uğradı") || firstMessage.includes("timeout");
@@ -846,14 +985,45 @@ export default function App() {
           setProfile(ensuredProfile);
           appendRuntimeLog("info", "POST_LOAD_PROFILE_READY", `role=${ensuredProfile?.role || "unknown"}`);
 
-          await publishLoad(24000);
+          createdLoad = await publishLoad(24000);
         } else if (isTimeout) {
           appendRuntimeLog("warn", "POST_LOAD_RETRY", "İlk deneme timeout, ikinci deneme başlatılıyor.");
-          await publishLoad(30000);
+          createdLoad = await publishLoad(30000);
         } else {
           throw firstError;
         }
       }
+
+      const createdLoadId = Number(createdLoad?.id || createdLoad?.[0]?.id || Date.now());
+      const optimisticDbLoad = {
+        id: createdLoadId,
+        employer_id: user.id,
+        origin_city: loadData.origin_city,
+        destination_city: loadData.destination_city,
+        distance_km: null,
+        load_type: loadData.load_type,
+        trailer_type: loadData.trailer_type,
+        weight_kg: loadData.weight_kg,
+        price: loadData.price,
+        currency: loadData.currency || "TRY",
+        status: loadData.status || "open",
+        pickup_date: loadData.pickup_date,
+        created_at: new Date().toISOString(),
+        is_urgent: loadData.is_urgent,
+        is_fleet: loadData.is_fleet,
+        truck_count: loadData.truck_count,
+        kdv_included: loadData.kdv_included,
+        profiles: {
+          full_name: profile?.full_name || user?.email || "İşveren",
+          avatar_url: profile?.avatar_url || null,
+          phone: profile?.phone || null,
+          role: profile?.role || "employer",
+        },
+      };
+      const optimisticUiLoad = mapDbToUi(optimisticDbLoad);
+      const nextVisibleLoads = [optimisticUiLoad, ...realLoads.filter((item) => Number(item.id) !== createdLoadId)];
+      setRealLoads(nextVisibleLoads);
+      applyLocalStatsFallback(nextVisibleLoads, { incrementLoads: true });
 
       setPostLoadError("");
       showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
@@ -869,6 +1039,11 @@ export default function App() {
         );
       } catch (refreshError) {
         appendRuntimeLog("warn", "POST_LOAD_REFRESH_WARN", refreshError?.message || "Refresh timeout");
+        showToast("İlan yayınlandı. Liste arka planda güncelleniyor.", "success", 7000);
+        setTimeout(() => {
+          fetchLoads();
+          fetchPublicStats();
+        }, 2500);
       }
       setFilterFrom(loadData.origin_city);
       setFilterTo("");

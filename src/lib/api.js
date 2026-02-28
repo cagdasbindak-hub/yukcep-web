@@ -38,6 +38,40 @@ const isDriverRole = (role) => {
   return ["driver", "sofor", "surucu"].includes(key);
 };
 
+const fetchJsonWithTimeout = async ({ url, headers, timeoutMs }) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+    if (!res.ok) {
+      const message =
+        (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
+        text ||
+        `HTTP ${res.status}`;
+      throw new Error(message);
+    }
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Request timeout after ${timeoutMs / 1000}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
 export const fetchProfileById = async (userId) => {
   const res = await supabase.from("profiles").select("*").eq("id", userId).single();
   return unwrap(res, "Failed to fetch profile");
@@ -298,6 +332,43 @@ export const fetchPublicStatsApi = async () => {
   if (!driversRes.error && Array.isArray(driversRes.data)) {
     activeDrivers = driversRes.data.filter((row) => isDriverRole(row.role)).length;
   }
+
+  return {
+    activeLoads: activeLoads.length,
+    activeDrivers,
+    activeCities: citySet.size,
+  };
+};
+
+export const fetchPublicStatsViaRestApi = async ({ timeoutMs = 12000 } = {}) => {
+  const headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+  };
+
+  const [loadRows, profileRows] = await Promise.all([
+    fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/loads?select=status,origin_city,destination_city`,
+      headers,
+      timeoutMs,
+    }),
+    fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/profiles?select=role`,
+      headers,
+      timeoutMs,
+    }),
+  ]);
+
+  const activeLoads = Array.isArray(loadRows) ? loadRows.filter((row) => isActiveLoadStatus(row.status)) : [];
+  const citySet = new Set();
+  activeLoads.forEach((row) => {
+    if (row.origin_city) citySet.add(String(row.origin_city).trim());
+    if (row.destination_city) citySet.add(String(row.destination_city).trim());
+  });
+
+  const activeDrivers = Array.isArray(profileRows)
+    ? profileRows.filter((row) => isDriverRole(row.role)).length
+    : 0;
 
   return {
     activeLoads: activeLoads.length,
