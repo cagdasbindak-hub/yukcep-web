@@ -10,6 +10,7 @@ import {
   fetchLoadsApi,
   fetchMyBidForLoadApi,
   fetchNotificationsApi,
+  fetchPublicStatsApi,
   fetchProfileById,
   markNotificationReadApi,
   updateBidStatusApi,
@@ -186,6 +187,7 @@ export default function App() {
   const [empForm, setEmpForm] = useState({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
   const [formErrors, setFormErrors] = useState({});
   const [locationQuery, setLocationQuery] = useState("");
+  const [publicStats, setPublicStats] = useState({ activeLoads: 0, activeDrivers: 0, activeCities: 0 });
   const chatEndRef = useRef(null);
 
   // Splash & effects
@@ -539,6 +541,15 @@ export default function App() {
     if (city) setFilterFrom(city);
   }, [city]);
 
+  const fetchPublicStats = useCallback(async () => {
+    try {
+      const data = await fetchPublicStatsApi();
+      setPublicStats(data);
+    } catch (error) {
+      console.error("Error fetching public stats:", error);
+    }
+  }, []);
+
   const fetchLoads = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -557,6 +568,10 @@ export default function App() {
     fetchLoads();
   }, [fetchLoads]);
 
+  useEffect(() => {
+    fetchPublicStats();
+  }, [fetchPublicStats]);
+
   // Keep map/list in sync with new inserts/updates from any user session.
   useEffect(() => {
     const channel = supabase
@@ -566,6 +581,7 @@ export default function App() {
         { event: "*", schema: "public", table: "loads" },
         () => {
           fetchLoads();
+          fetchPublicStats();
         }
       )
       .subscribe();
@@ -573,7 +589,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [fetchLoads]);
+  }, [fetchLoads, fetchPublicStats]);
 
   // Form Validation
   const validateForm = () => {
@@ -620,7 +636,7 @@ export default function App() {
         setTimeout(() => setShowConfetti(false), 100);
         setEmpForm({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
         setFormErrors({});
-        await fetchLoads();
+        await Promise.all([fetchLoads(), fetchPublicStats()]);
       } catch (error) {
         console.error("Insert error:", error);
         showToast(`❌ Hata: ${error.message}`, "error");
@@ -649,9 +665,9 @@ export default function App() {
   const loads = realLoads; // Filtering is handled in Supabase query now
 
   // animated stats
-  const statLoads = useAnimatedCount(1247);
-  const statDrivers = useAnimatedCount(8432);
-  const statCities = useAnimatedCount(81);
+  const statLoads = useAnimatedCount(publicStats.activeLoads);
+  const statDrivers = useAnimatedCount(publicStats.activeDrivers);
+  const statCities = useAnimatedCount(publicStats.activeCities);
 
   return (
     <div className="app-shell min-h-screen flex items-center justify-center p-3 sm:p-5">

@@ -171,3 +171,36 @@ export const createLoadApi = async (loadData) => {
 
   return unwrap(first, "Failed to create load");
 };
+
+export const fetchPublicStatsApi = async () => {
+  const [loadsRes, driversRes, cityRowsRes] = await Promise.all([
+    supabase.from("loads").select("id", { count: "exact", head: true }).eq("status", "open"),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "driver"),
+    supabase.from("loads").select("origin_city, destination_city").eq("status", "open"),
+  ]);
+
+  if (loadsRes.error) {
+    const err = new Error(`Failed to fetch active load count: ${loadsRes.error.message}`);
+    err.cause = loadsRes.error;
+    throw err;
+  }
+
+  if (driversRes.error) {
+    const err = new Error(`Failed to fetch driver count: ${driversRes.error.message}`);
+    err.cause = driversRes.error;
+    throw err;
+  }
+
+  const cityRows = unwrap(cityRowsRes, "Failed to fetch city stats");
+  const citySet = new Set();
+  cityRows.forEach((row) => {
+    if (row.origin_city) citySet.add(String(row.origin_city).trim());
+    if (row.destination_city) citySet.add(String(row.destination_city).trim());
+  });
+
+  return {
+    activeLoads: loadsRes.count ?? 0,
+    activeDrivers: driversRes.count ?? 0,
+    activeCities: citySet.size,
+  };
+};
