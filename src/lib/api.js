@@ -38,6 +38,20 @@ const isDriverRole = (role) => {
   return ["driver", "sofor", "surucu"].includes(key);
 };
 
+const getTodayDateKey = () => {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul" }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+};
+
+const isTodayOrFuturePickupDate = (pickupDate, todayDateKey = getTodayDateKey()) => {
+  const key = String(pickupDate || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return false;
+  return key >= todayDateKey;
+};
+
 const fetchJsonWithTimeout = async ({ url, headers, timeoutMs }) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -551,7 +565,10 @@ export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => 
   if (filterTrailer) query = query.eq("trailer_type", filterTrailer);
 
   const res = await query;
-  const data = unwrap(res, "Failed to fetch loads").filter((load) => isActiveLoadStatus(load.status));
+  const todayDateKey = getTodayDateKey();
+  const data = unwrap(res, "Failed to fetch loads").filter(
+    (load) => isActiveLoadStatus(load.status) && isTodayOrFuturePickupDate(load.pickup_date, todayDateKey)
+  );
   const employerIds = [...new Set(data.map((row) => row?.employer_id).filter(Boolean))];
   let profileMap = new Map();
   if (employerIds.length) {
@@ -617,8 +634,11 @@ export const fetchLoadsViaRestApi = async ({
     timeoutMs,
   });
 
+  const todayDateKey = getTodayDateKey();
   const activeLoads = Array.isArray(loadRows)
-    ? loadRows.filter((row) => isActiveLoadStatus(row.status))
+    ? loadRows.filter(
+        (row) => isActiveLoadStatus(row.status) && isTodayOrFuturePickupDate(row.pickup_date, todayDateKey)
+      )
     : [];
   const employerIds = [...new Set(activeLoads.map((row) => row?.employer_id).filter(Boolean))];
 
@@ -832,22 +852,16 @@ export const createBidViaRestApi = async ({ loadId, driverId, price, accessToken
 };
 
 export const fetchPublicStatsApi = async () => {
-  const fast = await supabase.rpc("get_public_stats_fast");
-  if (!fast.error && Array.isArray(fast.data) && fast.data[0]) {
-    return {
-      activeLoads: Number(fast.data[0].active_loads) || 0,
-      activeDrivers: Number(fast.data[0].active_drivers) || 0,
-      activeCities: Number(fast.data[0].active_cities) || 0,
-    };
-  }
-
   const [loadsRes, driversRes] = await Promise.all([
-    supabase.from("loads").select("id, status, origin_city, destination_city"),
+    supabase.from("loads").select("id, status, pickup_date, origin_city, destination_city"),
     supabase.from("profiles").select("id, role"),
   ]);
 
   const loads = unwrap(loadsRes, "Failed to fetch public load stats");
-  const activeLoads = loads.filter((row) => isActiveLoadStatus(row.status));
+  const todayDateKey = getTodayDateKey();
+  const activeLoads = loads.filter(
+    (row) => isActiveLoadStatus(row.status) && isTodayOrFuturePickupDate(row.pickup_date, todayDateKey)
+  );
 
   const citySet = new Set();
   activeLoads.forEach((row) => {
@@ -875,7 +889,7 @@ export const fetchPublicStatsViaRestApi = async ({ timeoutMs = 12000 } = {}) => 
 
   const [loadRows, profileRows] = await Promise.all([
     fetchJsonWithTimeout({
-      url: `${SUPABASE_URL}/rest/v1/loads?select=status,origin_city,destination_city`,
+      url: `${SUPABASE_URL}/rest/v1/loads?select=status,pickup_date,origin_city,destination_city`,
       headers,
       timeoutMs,
     }),
@@ -886,7 +900,12 @@ export const fetchPublicStatsViaRestApi = async ({ timeoutMs = 12000 } = {}) => 
     }),
   ]);
 
-  const activeLoads = Array.isArray(loadRows) ? loadRows.filter((row) => isActiveLoadStatus(row.status)) : [];
+  const todayDateKey = getTodayDateKey();
+  const activeLoads = Array.isArray(loadRows)
+    ? loadRows.filter(
+        (row) => isActiveLoadStatus(row.status) && isTodayOrFuturePickupDate(row.pickup_date, todayDateKey)
+      )
+    : [];
   const citySet = new Set();
   activeLoads.forEach((row) => {
     if (row.origin_city) citySet.add(String(row.origin_city).trim());
@@ -917,8 +936,11 @@ export const fetchDriverFeedApi = async ({ userId }) => {
     .from("loads")
     .select("id, employer_id, origin_city, destination_city, pickup_date, load_type, trailer_type, price, currency, status, created_at")
     .in("id", loadIds);
-  const loads = unwrap(loadsRes, "Failed to fetch driver feed loads");
+  const allLoads = unwrap(loadsRes, "Failed to fetch driver feed loads");
+  const todayDateKey = getTodayDateKey();
+  const loads = allLoads.filter((row) => isTodayOrFuturePickupDate(row.pickup_date, todayDateKey));
   const loadMap = new Map(loads.map((row) => [row.id, row]));
+  const visibleBids = bids.filter((row) => loadMap.has(row.load_id));
 
   const employerIds = [...new Set(loads.map((row) => row.employer_id).filter(Boolean))];
   let profileMap = new Map();
@@ -932,7 +954,7 @@ export const fetchDriverFeedApi = async ({ userId }) => {
     }
   }
 
-  return bids.map((bid) => {
+  return visibleBids.map((bid) => {
     const load = loadMap.get(bid.load_id) || {};
     const employer = profileMap.get(load.employer_id) || null;
     return {
@@ -999,8 +1021,12 @@ export const fetchDriverFeedViaRestApi = async ({ userId, accessToken, timeoutMs
     headers,
     timeoutMs,
   });
-  const loads = Array.isArray(loadsRows) ? loadsRows : [];
+  const todayDateKey = getTodayDateKey();
+  const loads = Array.isArray(loadsRows)
+    ? loadsRows.filter((row) => isTodayOrFuturePickupDate(row.pickup_date, todayDateKey))
+    : [];
   const loadMap = new Map(loads.map((row) => [row.id, row]));
+  const visibleBids = bids.filter((row) => loadMap.has(row.load_id));
 
   const employerIds = [...new Set(loads.map((row) => row.employer_id).filter(Boolean))];
   let profileMap = new Map();
@@ -1015,7 +1041,7 @@ export const fetchDriverFeedViaRestApi = async ({ userId, accessToken, timeoutMs
     }
   }
 
-  return bids.map((bid) => {
+  return visibleBids.map((bid) => {
     const load = loadMap.get(bid.load_id) || {};
     const employer = profileMap.get(load.employer_id) || null;
     return {
@@ -1049,7 +1075,10 @@ export const fetchEmployerFeedApi = async ({ userId }) => {
     .select("id, employer_id, origin_city, destination_city, pickup_date, load_type, trailer_type, price, currency, status, created_at")
     .eq("employer_id", userId)
     .order("created_at", { ascending: false });
-  const loads = unwrap(loadsRes, "Failed to fetch employer feed loads");
+  const todayDateKey = getTodayDateKey();
+  const loads = unwrap(loadsRes, "Failed to fetch employer feed loads").filter((row) =>
+    isTodayOrFuturePickupDate(row.pickup_date, todayDateKey)
+  );
 
   if (!loads.length) return [];
 
@@ -1130,7 +1159,10 @@ export const fetchEmployerFeedViaRestApi = async ({ userId, accessToken, timeout
     headers,
     timeoutMs,
   });
-  const loads = Array.isArray(loadsRows) ? loadsRows : [];
+  const todayDateKey = getTodayDateKey();
+  const loads = Array.isArray(loadsRows)
+    ? loadsRows.filter((row) => isTodayOrFuturePickupDate(row.pickup_date, todayDateKey))
+    : [];
   if (!loads.length) return [];
 
   const loadIds = loads.map((row) => row.id).filter(Boolean);

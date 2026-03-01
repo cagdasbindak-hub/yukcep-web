@@ -71,7 +71,7 @@ const run = async () => {
     const syntheticFeedbackPattern = /(db verify feedback|e2e|smoke|test|deneme)/i;
     const feedbackActionableRows = feedbackRows.filter((row) => {
       const line = String(row || "");
-      return /Yapacağım/i.test(line) && !/Kötü Fikir/i.test(line) && !syntheticFeedbackPattern.test(line);
+      return /(Güzel Fikir|Yapım Aşamasında|Yapacağım)/i.test(line) && !/Kötü Fikir/i.test(line) && !syntheticFeedbackPattern.test(line);
     });
 
     report.findings.feedback = {

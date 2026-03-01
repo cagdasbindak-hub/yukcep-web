@@ -343,6 +343,7 @@ AS $$
     SELECT origin_city, destination_city
     FROM public.loads
     WHERE status NOT IN ('completed', 'cancelled')
+      AND pickup_date >= (timezone('Europe/Istanbul', now()))::date
   ),
   city_rows AS (
     SELECT origin_city AS city FROM active_load_rows WHERE origin_city IS NOT NULL

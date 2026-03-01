@@ -96,6 +96,8 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Feedback panosunda eski otomatik yorum/tag sonuçları sıfırdan yeniden değerlendiriliyor; yanlış filtrelenen öneriler tekrar etiketleniyor." },
+  { date: "2026-03-01", title: "Yük listeleri/istatistik/feed akışlarında pickup_date filtresi eklendi: yalnızca bugün ve gelecek tarihli yükler gösteriliyor." },
   { date: "2026-03-01", title: "Feedback listesi girişte timeout olursa otomatik ikinci deneme eklendi; geçici gecikmelerde kullanıcıya kırmızı hata gösterimi kaldırıldı." },
   { date: "2026-03-01", title: "Ops check otomasyonu eklendi: canlıda feedback panosu + hata/çalışma logları taranıp backlog raporu üretiliyor." },
   { date: "2026-03-01", title: "Feedback listesinde teknik DB hata metinleri gizlendi; tablo eksikse kullanıcıya güvenli fallback mesajı gösteriliyor." },
@@ -141,6 +143,7 @@ const FEEDBACK_FETCH_COOLDOWN_MS = 2400;
 const REPORT_RATE_LIMIT_MS = 5 * 60 * 1000;
 const FEEDBACK_RATE_LIMIT_MS = 45 * 1000;
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "2026.03.01";
+const FEEDBACK_REVIEW_VERSION = 2;
 
 const DEFAULT_USER_SETTINGS = {
   notificationsEnabled: true,
@@ -238,93 +241,114 @@ const sanitizeFeedbackText = (value = "") =>
 
 const sanitizeFeedbackItems = (items = []) =>
   (Array.isArray(items) ? items : [])
-    .map((item) => ({
-      id: Number(item?.id) || Number(`${Date.now()}${Math.floor(Math.random() * 999)}`),
-      user_id: item?.user_id || null,
-      author_name: String(item?.author_name || "Kullanıcı").trim() || "Kullanıcı",
-      content: sanitizeFeedbackText(item?.content || ""),
-      codex_comment: sanitizeFeedbackText(item?.codex_comment || ""),
-      status_tag: ["yapildi", "yapilacak", "kotu_fikir"].includes(item?.status_tag) ? item.status_tag : "yapilacak",
-      moderation_status: item?.moderation_status === "filtered" ? "filtered" : "published",
-      created_at: item?.created_at || new Date().toISOString(),
-      updated_at: item?.updated_at || item?.created_at || new Date().toISOString(),
-    }))
+    .map((item) => {
+      const rawId = item?.id;
+      const normalizedId =
+        rawId !== undefined && rawId !== null && String(rawId).trim().length > 0
+          ? rawId
+          : `fb-${Date.now()}-${Math.floor(Math.random() * 999)}`;
+      return {
+        id: normalizedId,
+        user_id: item?.user_id || null,
+        author_name: String(item?.author_name || "Kullanıcı").trim() || "Kullanıcı",
+        content: sanitizeFeedbackText(item?.content || ""),
+        codex_comment: sanitizeFeedbackText(item?.codex_comment || ""),
+        status_tag: ["yapildi", "yapilacak", "yapim_asamasinda", "kotu_fikir"].includes(item?.status_tag)
+          ? item.status_tag
+          : "yapilacak",
+        moderation_status: item?.moderation_status === "filtered" ? "filtered" : "published",
+        review_version: Number(item?.review_version) || 1,
+        created_at: item?.created_at || new Date().toISOString(),
+        updated_at: item?.updated_at || item?.created_at || new Date().toISOString(),
+      };
+    })
     .filter((item) => item.content.length >= 6)
     .slice(0, 80);
 
-const evaluateFeedbackSubmission = ({ content, releaseUpdates }) => {
+const evaluateFeedbackSubmission = ({ content, releaseUpdates = [] }) => {
   const text = sanitizeFeedbackText(content);
-  if (!text || text.length < 8) {
-    return {
-      moderationStatus: "filtered",
-      statusTag: "kotu_fikir",
-      codexComment: "Bu mesaj net bir geri bildirim değil. Daha açık bir öneri veya hata tanımı yaz.",
-    };
-  }
-
   const lower = text.toLocaleLowerCase("tr-TR");
-  const riskyPattern = /(sifre|password|token|admin yetkisi|dogrulamayi kaldir|guvenlik.*kapat|hack)/i;
-  if (riskyPattern.test(lower)) {
-    return {
-      moderationStatus: "filtered",
-      statusTag: "kotu_fikir",
-      codexComment: "Bu öneri güvenlik riskli olduğu için uygulanamaz.",
-    };
-  }
-
+  const riskyPattern = /(sifre|password|token|admin yetkisi|dogrulamayi kaldir|guvenlik.*kapat|hack|sql inject|ddos)/i;
   const offTopicPattern = /(bahis|casino|kumar|kripto sinyal|reklam verelim|telegram grubu|takip et kazan)/i;
-  if (offTopicPattern.test(lower)) {
+  const spamPattern = /(http[s]?:\/\/.*http[s]?:\/\/|bedava takip|hemen para kazan)/i;
+
+  if (!lower) {
     return {
       moderationStatus: "filtered",
       statusTag: "kotu_fikir",
-      codexComment: "Bu yorum ürün geri bildirimi kapsamına girmiyor.",
+      codexComment: "Bu içerik boş görünüyor. Daha net bir geri bildirim yazabilirsin.",
     };
   }
 
-  const hasTooManyLinks = (text.match(/https?:\/\//gi) || []).length > 1;
-  if (hasTooManyLinks) {
+  if (riskyPattern.test(lower) || offTopicPattern.test(lower) || spamPattern.test(lower)) {
     return {
       moderationStatus: "filtered",
       statusTag: "kotu_fikir",
-      codexComment: "Aşırı link içeren yorumlar otomatik filtrelenir. Kısa ve net geri bildirim paylaş.",
+      codexComment: "Bu içerik ürün geri bildirimi kapsamında değerlendirilemedi.",
     };
   }
 
-  const feedbackSignalPattern = /(hata|bug|calismiyor|çalışmıyor|duzelt|düzelt|iyilestir|iyileştir|ekle|eksik|performans|yavas|yavaş|ui|ux|tasarim|tasarım|bildirim|rol|feed|ilan|teklif|harita|filtre|kayit|kayıt|giris|giriş|buton)/i;
   const releaseText = sanitizeReleaseUpdates(releaseUpdates)
-    .map((item) => String(item?.title || "").toLocaleLowerCase("tr-TR"))
+    .map((row) => String(row?.title || "").toLocaleLowerCase("tr-TR"))
     .join(" ");
-  const words = lower.split(/\s+/).filter((w) => w.length > 4);
-  const overlapCount = words.filter((w, idx) => words.indexOf(w) === idx && releaseText.includes(w)).length;
 
-  if (/(duzeldi|düzeldi|cozuldu|çözüldü|yapildi|yapıldı)/i.test(lower) || overlapCount >= 2) {
+  const words = lower.split(/\s+/).filter((word) => word.length > 4);
+  const overlapCount = words.filter((word, idx) => words.indexOf(word) === idx && releaseText.includes(word)).length;
+  const donePattern = /(duzeldi|düzeldi|cozuldu|çözüldü|uygulandi|uygulandı|tamamlandi|tamamlandı|eklendi|yayinda|yayında)/i;
+
+  if (overlapCount >= 2 || donePattern.test(lower)) {
     return {
       moderationStatus: "published",
       statusTag: "yapildi",
-      codexComment: "İyi geri bildirim. Bu konu son güncellemelerde ele alınmış görünüyor.",
+      codexComment: "Yaptım, teşekkür ederim. Bu konu son güncellemelerde uygulandı.",
     };
   }
 
-  if (!feedbackSignalPattern.test(lower)) {
+  const actionablePattern =
+    /(hata|bug|calismiyor|çalışmıyor|duzelt|düzelt|iyilestir|iyileştir|ekle|eksik|performans|yavas|yavaş|ui|ux|tasarim|tasarım|bildirim|rol|feed|ilan|teklif|harita|filtre|kayit|kayıt|giris|giriş|buton|konum|lokasyon|sehir|şehir|eşleş|esles|sırala|sirala|önce|once|arama)/i;
+
+  if (actionablePattern.test(lower)) {
     return {
-      moderationStatus: "filtered",
-      statusTag: "kotu_fikir",
-      codexComment: "Bu içerik net bir öneri/hata içermiyor. Daha spesifik geri bildirim yaz.",
+      moderationStatus: "published",
+      statusTag: "yapilacak",
+      codexComment: "Güzel fikir. Yeni kuralla yeniden değerlendirildi ve yapılacaklar listesine alındı.",
     };
   }
 
   return {
     moderationStatus: "published",
     statusTag: "yapilacak",
-    codexComment: "İyi geri bildirim, uygulanabilir. Plan listesine alındı.",
+    codexComment: "Güzel fikir. Biraz daha detay eklersen daha hızlı uygulayabilirim.",
   };
 };
+
+const retagFeedbackItemsFromScratch = ({ items, releaseUpdates = [] }) =>
+  sanitizeFeedbackItems(items).map((item) => {
+    const triage = evaluateFeedbackSubmission({
+      content: item.content,
+      releaseUpdates,
+    });
+
+    return {
+      ...item,
+      codex_comment: triage.codexComment,
+      status_tag: triage.statusTag,
+      moderation_status: triage.moderationStatus,
+      review_version: FEEDBACK_REVIEW_VERSION,
+    };
+  });
 
 const getFeedbackStatusUi = (statusTag) => {
   if (statusTag === "yapildi") {
     return {
-      label: "Yaptım",
+      label: "Yaptım, teşekkürler",
       className: "bg-emerald-500/15 text-emerald-300 border border-emerald-500/40",
+    };
+  }
+  if (statusTag === "yapim_asamasinda") {
+    return {
+      label: "Yapım Aşamasında",
+      className: "bg-amber-500/15 text-amber-300 border border-amber-500/40",
     };
   }
   if (statusTag === "kotu_fikir") {
@@ -334,8 +358,24 @@ const getFeedbackStatusUi = (statusTag) => {
     };
   }
   return {
-    label: "Yapacağım",
+    label: "Güzel Fikir",
     className: "bg-cyan-500/15 text-cyan-300 border border-cyan-500/40",
+  };
+};
+
+const resolveFeedbackDisplayState = ({ item, releaseUpdates }) => {
+  if (!item) return item;
+  const triage = evaluateFeedbackSubmission({
+    content: item.content,
+    releaseUpdates,
+  });
+
+  return {
+    ...item,
+    moderation_status: triage.moderationStatus,
+    status_tag: triage.statusTag,
+    codex_comment: triage.codexComment,
+    review_version: FEEDBACK_REVIEW_VERSION,
   };
 };
 
@@ -757,16 +797,19 @@ export default function App() {
     return sanitized;
   }, []);
 
-  const persistFeedbackItems = useCallback((nextItems) => {
-    const sanitized = sanitizeFeedbackItems(nextItems);
-    setFeedbackItems(sanitized);
+  const persistFeedbackItems = useCallback((nextItems, options = {}) => {
+    const reviewed = retagFeedbackItemsFromScratch({
+      items: nextItems,
+      releaseUpdates: Array.isArray(options?.releaseUpdates) ? options.releaseUpdates : releaseUpdates,
+    });
+    setFeedbackItems(reviewed);
     try {
-      localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(sanitized));
+      localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(reviewed));
     } catch {
       // ignore cache write failures
     }
-    return sanitized;
-  }, []);
+    return reviewed;
+  }, [releaseUpdates]);
 
   const applyLocalStatsFallback = useCallback((candidateLoads, options = {}) => {
     const localDerived = deriveStatsFromUiLoads(candidateLoads);
@@ -882,12 +925,12 @@ export default function App() {
       if (!raw) return;
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        setFeedbackItems(sanitizeFeedbackItems(parsed));
+        persistFeedbackItems(parsed);
       }
     } catch {
       // ignore malformed feedback cache
     }
-  }, []);
+  }, [persistFeedbackItems]);
 
   useEffect(() => {
     try {
@@ -1719,6 +1762,7 @@ export default function App() {
           codex_comment: triage.codexComment,
           status_tag: triage.statusTag,
           moderation_status: triage.moderationStatus,
+          review_version: FEEDBACK_REVIEW_VERSION,
         };
         let runtimeFallbackSaved = false;
         try {
@@ -1746,12 +1790,12 @@ export default function App() {
         }
 
         setFeedbackItems((prev) => {
-          const fallbackRow = {
-            id: `rt-local-${Date.now()}`,
-            ...fallbackPayload,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          };
+              const fallbackRow = {
+                id: `rt-local-${Date.now()}`,
+                ...fallbackPayload,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              };
           const merged = sanitizeFeedbackItems([fallbackRow, ...prev]);
           try {
             localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(merged));
@@ -2705,7 +2749,18 @@ export default function App() {
   const statLoads = useAnimatedCount(publicStats.activeLoads);
   const statDrivers = useAnimatedCount(publicStats.activeDrivers);
   const statCities = useAnimatedCount(publicStats.activeCities);
-  const feedbackPreviewItems = feedbackItems.slice(0, 20);
+  const feedbackPreviewItems = useMemo(
+    () =>
+      feedbackItems
+        .slice(0, 20)
+        .map((item) =>
+          resolveFeedbackDisplayState({
+            item,
+            releaseUpdates,
+          })
+        ),
+    [feedbackItems, releaseUpdates]
+  );
   const showDriverHomeAction = !user || (Boolean(user) && !activeRole);
   const showEmployerHomeAction = !user || (Boolean(user) && !activeRole);
 
@@ -3030,7 +3085,7 @@ export default function App() {
                     <span className="text-[10px] text-slate-500 font-bold">HERKESE AÇIK</span>
                   </div>
                   <p className="text-slate-400 text-[11px] leading-relaxed mb-3">
-                    1. kolon kullanıcı önerisi, 2. kolon otomatik Codex yorumu, 3. kolon otomatik durum etiketidir.
+                    1. kolon kullanıcı önerisi, 2. kolon Codex yeniden değerlendirme yorumu, 3. kolon yeniden etiketlenmiş durumdur.
                   </p>
 
                   <div className="space-y-2 mb-3">
