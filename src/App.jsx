@@ -96,6 +96,7 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Feedback gönderiminde schema cache/table missing hatası için yerel + runtime çift fallback sertleştirildi; kritik hata yerine güvenli kayıt akışı aktif." },
   { date: "2026-03-01", title: "Son 10 Güncelleme üstüne herkese açık Feedback Panosu eklendi: kullanıcı önerisi + otomatik Codex yorumu + durum tag." },
   { date: "2026-03-01", title: "Feedback moderasyonu otomatikleştirildi; geri bildirim dışı yorumlar filtrelenip Kötü Fikir etiketiyle işaretleniyor." },
   { date: "2026-03-01", title: "Launch hardening: CI (lint/build/smoke/a11y), post-deploy smoke ve health-check otomasyonu eklendi." },
@@ -335,8 +336,28 @@ const getFeedbackStatusUi = (statusTag) => {
   };
 };
 
-const isFeedbackTableMissingError = (message = "") =>
-  /(feedback_items|relation .*feedback_items|does not exist|bulunamadi|not found)/i.test(String(message || ""));
+const buildFeedbackErrorText = (errorOrMessage = "") => {
+  if (typeof errorOrMessage === "string") return errorOrMessage;
+  if (!errorOrMessage || typeof errorOrMessage !== "object") return String(errorOrMessage || "");
+  const parts = [
+    errorOrMessage?.message,
+    errorOrMessage?.details,
+    errorOrMessage?.hint,
+    errorOrMessage?.code,
+    errorOrMessage?.cause?.message,
+    errorOrMessage?.cause?.details,
+    errorOrMessage?.cause?.hint,
+    errorOrMessage?.cause?.code,
+  ].filter(Boolean);
+  return parts.join(" | ");
+};
+
+const isFeedbackTableMissingError = (errorOrMessage = "") => {
+  const message = buildFeedbackErrorText(errorOrMessage);
+  return /(feedback_items|public\.feedback_items|schema\s*cache|pgrst205|42p01|relation .*feedback_items|does not exist|bulunamadi|not found|could not find the table)/i.test(
+    String(message || "")
+  );
+};
 
 const parseFeedbackRuntimeDetails = (details = "") => {
   try {
@@ -1686,18 +1707,18 @@ export default function App() {
       }
     } catch (error) {
       const message = error?.message || "Feedback gönderilemedi.";
-      if (isFeedbackTableMissingError(message)) {
+      if (isFeedbackTableMissingError(error)) {
+        const fallbackPayload = {
+          type: "feedback_item",
+          user_id: user.id,
+          author_name: profile?.full_name || user?.email?.split("@")[0] || "Kullanıcı",
+          content: normalizedInput,
+          codex_comment: triage.codexComment,
+          status_tag: triage.statusTag,
+          moderation_status: triage.moderationStatus,
+        };
+        let runtimeFallbackSaved = false;
         try {
-          const fallbackPayload = {
-            type: "feedback_item",
-            user_id: user.id,
-            author_name: profile?.full_name || user?.email?.split("@")[0] || "Kullanıcı",
-            content: normalizedInput,
-            codex_comment: triage.codexComment,
-            status_tag: triage.statusTag,
-            moderation_status: triage.moderationStatus,
-          };
-
           await withTimeout(
             insertRuntimeLogsApi({
               logs: [
@@ -1716,30 +1737,43 @@ export default function App() {
             9000,
             "Feedback fallback insert zaman aşımına uğradı (9sn)."
           );
-
-          setFeedbackItems((prev) => {
-            const fallbackRow = {
-              id: `rt-local-${Date.now()}`,
-              ...fallbackPayload,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            };
-            const merged = sanitizeFeedbackItems([fallbackRow, ...prev]);
-            try {
-              localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(merged));
-            } catch {
-              // ignore storage failures
-            }
-            return merged;
-          });
-          setFeedbackInput("");
-          setFeedbackError("Feedback tablosu henüz yok. Geçici log fallback ile kaydedildi.");
-          appendRuntimeLog("warn", "FEEDBACK_CREATE_FALLBACK", "feedback_items eksik, runtime_logs fallback kullanıldı.");
-          showToast("Feedback alındı (geçici fallback).");
-          return;
+          runtimeFallbackSaved = true;
         } catch (fallbackError) {
           appendRuntimeLog("error", "FEEDBACK_CREATE_FALLBACK_FAIL", fallbackError?.message || "Feedback fallback failed");
         }
+
+        setFeedbackItems((prev) => {
+          const fallbackRow = {
+            id: `rt-local-${Date.now()}`,
+            ...fallbackPayload,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          const merged = sanitizeFeedbackItems([fallbackRow, ...prev]);
+          try {
+            localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(merged));
+          } catch {
+            // ignore storage failures
+          }
+          return merged;
+        });
+        setFeedbackInput("");
+        try {
+          localStorage.setItem(rateKey, String(nowTs));
+        } catch {
+          // ignore storage write failures
+        }
+
+        if (runtimeFallbackSaved) {
+          setFeedbackError("Feedback tablosu henüz yok. Geçici log fallback ile kaydedildi.");
+          appendRuntimeLog("warn", "FEEDBACK_CREATE_FALLBACK", "feedback_items eksik, runtime_logs fallback kullanıldı.");
+          showToast("Feedback alındı (geçici fallback).");
+        } else {
+          setFeedbackError("Feedback tablosu henüz yok. Yerel fallback ile kaydedildi.");
+          appendRuntimeLog("warn", "FEEDBACK_CREATE_LOCAL_ONLY", "feedback_items/runtime_logs yok; local fallback kullanıldı.");
+          showToast("Feedback alındı (yerel fallback).");
+        }
+        return;
       }
 
       appendRuntimeLog("error", "FEEDBACK_CREATE_FAIL", message);
@@ -2080,7 +2114,7 @@ export default function App() {
         const message = error?.message || "Feedback fetch failed";
         appendRuntimeLog("warn", "FEEDBACK_FETCH_FAIL", message);
 
-        if (isFeedbackTableMissingError(message)) {
+        if (isFeedbackTableMissingError(error)) {
           try {
             const runtimeRes = await withTimeout(
               supabase
