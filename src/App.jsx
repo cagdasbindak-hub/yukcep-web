@@ -96,6 +96,7 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Ops check otomasyonu eklendi: canlıda feedback panosu + hata/çalışma logları taranıp backlog raporu üretiliyor." },
   { date: "2026-03-01", title: "Feedback listesinde teknik DB hata metinleri gizlendi; tablo eksikse kullanıcıya güvenli fallback mesajı gösteriliyor." },
   { date: "2026-03-01", title: "Feedback gönderiminde schema cache/table missing hatası için yerel + runtime çift fallback sertleştirildi; kritik hata yerine güvenli kayıt akışı aktif." },
   { date: "2026-03-01", title: "Son 10 Güncelleme üstüne herkese açık Feedback Panosu eklendi: kullanıcı önerisi + otomatik Codex yorumu + durum tag." },

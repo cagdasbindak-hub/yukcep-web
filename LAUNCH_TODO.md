@@ -39,3 +39,4 @@ Legend:
 ## Blocked Items To Retry At End
 
 - `#3` Execute `tests/rls_authorization.sql` in Supabase SQL editor with privileged project credentials and archive output.
+- `feedback` Apply `schema.sql` in Supabase SQL editor so `public.feedback_items` and its RLS policies are present in production schema cache.
