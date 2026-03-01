@@ -96,6 +96,7 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Feedback listesi girişte timeout olursa otomatik ikinci deneme eklendi; geçici gecikmelerde kullanıcıya kırmızı hata gösterimi kaldırıldı." },
   { date: "2026-03-01", title: "Ops check otomasyonu eklendi: canlıda feedback panosu + hata/çalışma logları taranıp backlog raporu üretiliyor." },
   { date: "2026-03-01", title: "Feedback listesinde teknik DB hata metinleri gizlendi; tablo eksikse kullanıcıya güvenli fallback mesajı gösteriliyor." },
   { date: "2026-03-01", title: "Feedback gönderiminde schema cache/table missing hatası için yerel + runtime çift fallback sertleştirildi; kritik hata yerine güvenli kayıt akışı aktif." },
@@ -2110,16 +2111,42 @@ export default function App() {
       try {
         const rows = await withTimeout(
           fetchFeedbackItemsApi({ limit: 50 }),
-          9000,
-          "Feedback listesi zaman aşımına uğradı (9sn)."
+          12000,
+          "Feedback listesi zaman aşımına uğradı (12sn)."
         );
         persistFeedbackItems(rows);
         return rows;
       } catch (error) {
-        const message = error?.message || "Feedback fetch failed";
+        let effectiveError = error;
+        let message = effectiveError?.message || "Feedback fetch failed";
+        const timeoutPattern = /timeout|zaman aşım/i;
+
+        if (timeoutPattern.test(String(message || ""))) {
+          appendRuntimeLog("warn", "FEEDBACK_FETCH_RETRY", "İlk deneme timeout, ikinci deneme başlatılıyor.");
+          try {
+            const retryRows = await withTimeout(
+              fetchFeedbackItemsApi({ limit: 50 }),
+              16000,
+              "Feedback listesi ikinci denemede de zaman aşımına uğradı (16sn)."
+            );
+            persistFeedbackItems(retryRows);
+            setFeedbackError("");
+            appendRuntimeLog(
+              "info",
+              "FEEDBACK_FETCH_OK_RETRY",
+              `rows=${Array.isArray(retryRows) ? retryRows.length : 0}`
+            );
+            return retryRows;
+          } catch (retryError) {
+            effectiveError = retryError;
+            message = retryError?.message || message;
+            appendRuntimeLog("warn", "FEEDBACK_FETCH_RETRY_FAIL", message);
+          }
+        }
+
         appendRuntimeLog("warn", "FEEDBACK_FETCH_FAIL", message);
 
-        if (isFeedbackTableMissingError(error)) {
+        if (isFeedbackTableMissingError(effectiveError)) {
           try {
             const runtimeRes = await withTimeout(
               supabase
@@ -2164,10 +2191,13 @@ export default function App() {
           }
         }
 
-        const feedbackFetchUiError = /timeout|zaman aşım/i.test(String(message || ""))
-          ? "Feedback listesi geç yanıt verdi. Birkaç saniye sonra tekrar dene."
-          : "Feedback listesi şu an yüklenemedi. Lütfen tekrar dene.";
-        setFeedbackError(feedbackFetchUiError);
+        if (timeoutPattern.test(String(message || ""))) {
+          // Timeout durumlarında mevcut listeyi koru; kullanıcıya kırmızı hata göstermeyelim.
+          setFeedbackError("");
+          return null;
+        }
+
+        setFeedbackError("Feedback listesi şu an yüklenemedi. Lütfen tekrar dene.");
         return null;
       } finally {
         setIsFeedbackLoading(false);

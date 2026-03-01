@@ -14,6 +14,7 @@
     "health:check": "node scripts/health-check.mjs",
     "smoke": "node scripts/smoke-check.mjs",
     "ops:check": "node scripts/ops-check.mjs",
+    "ops:routine": "npm run ops:check && npm run lint && npm run build && npm run smoke && npm run ops:check",
     "a11y:smoke": "node scripts/a11y-smoke.mjs",
     "e2e:live": "node scripts/live-e2e-check.mjs",
     "ci:check": "npm run lint && npm run build && npm run smoke"

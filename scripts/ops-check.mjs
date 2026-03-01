@@ -46,25 +46,43 @@ const run = async () => {
     }
     report.steps.push({ step: "brand-visible", ok: true });
 
-    const feedbackHeadingVisible = await page.locator("text=Feedback Panosu").first().isVisible().catch(() => false);
-    const feedbackStatusVisible = await page
+    const feedbackPanel = page.locator("div", { has: page.locator("text=Feedback Panosu") }).first();
+    const feedbackHeadingVisible = await feedbackPanel.isVisible().catch(() => false);
+    const feedbackStatusVisible = await feedbackPanel
       .locator("text=Feedback panosu hazırlanıyor. Geçici kayıtlar gösterilecek.")
       .first()
       .isVisible()
       .catch(() => false);
-    const feedbackTechErrorVisible = await page
+    const feedbackTechErrorVisible = await feedbackPanel
       .locator("text=Failed to fetch feedback items")
       .first()
       .isVisible()
       .catch(() => false);
-    const feedbackRows = await page.locator("table tbody tr").allTextContents().catch(() => []);
+    const feedbackEmptyVisible = await feedbackPanel
+      .locator("text=Henüz feedback yok.")
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const feedbackRows = await feedbackPanel
+      .locator("div.max-h-52.overflow-y-auto.pr-1.space-y-2 > div")
+      .allTextContents()
+      .catch(() => []);
+
+    const syntheticFeedbackPattern = /(db verify feedback|e2e|smoke|test|deneme)/i;
+    const feedbackActionableRows = feedbackRows.filter((row) => {
+      const line = String(row || "");
+      return /Yapacağım/i.test(line) && !/Kötü Fikir/i.test(line) && !syntheticFeedbackPattern.test(line);
+    });
 
     report.findings.feedback = {
       headingVisible: feedbackHeadingVisible,
       fallbackInfoVisible: feedbackStatusVisible,
       technicalErrorVisible: feedbackTechErrorVisible,
-      rowCount: feedbackRows.filter((row) => !/Henüz feedback yok\./i.test(String(row))).length,
+      emptyVisible: feedbackEmptyVisible,
+      rowCount: feedbackRows.length,
+      actionableCount: feedbackActionableRows.length,
       preview: feedbackRows.slice(0, 5),
+      actionablePreview: feedbackActionableRows.slice(0, 5),
     };
 
     const logToggle = page.getByRole("button", { name: /Goster|Göster/i }).first();
@@ -99,6 +117,14 @@ const run = async () => {
         priority: "high",
         code: "DB_MIGRATION_FEEDBACK_ITEMS",
         action: "Apply schema.sql in Supabase SQL editor to create public.feedback_items and related policies.",
+      });
+    }
+
+    if (feedbackActionableRows.length > 0) {
+      report.backlog.push({
+        priority: "medium",
+        code: "FEEDBACK_ACTIONABLE",
+        action: "Review actionable feedback rows and convert them into fixes/todo items before finalizing the next deploy.",
       });
     }
 
