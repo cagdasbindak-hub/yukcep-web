@@ -69,6 +69,7 @@ const empReviews = {
 const getER = name => empReviews[name] || empReviews["default"];
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Canlı sayaçlarda public stats sorgusu tekilleştirildi; fallback başarılıysa gereksiz timeout WARN logları azaltıldı." },
   { date: "2026-02-28", title: "Şoför ve işveren için ayrı Feed ekranları eklendi." },
   { date: "2026-02-28", title: "10 adımlı E2E senaryo checklist ekranı feed içine eklendi." },
   { date: "2026-02-28", title: "Profil menüsüne açılır Ayarlar paneli (hazır/placeholder) eklendi." },
@@ -92,6 +93,7 @@ const RELEASE_UPDATES_KEY = "yukcep_release_updates_v1";
 const ROLE_HINT_KEY = "yukcep_profile_role_hint_v1";
 const REMOTE_LOG_FLUSH_SIZE = 6;
 const REMOTE_LOG_FLUSH_DELAY_MS = 2200;
+const PUBLIC_STATS_FETCH_COOLDOWN_MS = 2500;
 
 const normalizeRoleHint = (role) => {
   if (role === "employer") return "employer";
@@ -370,6 +372,13 @@ export default function App() {
   const remoteLogInFlightRef = useRef(false);
   const remoteLogDisabledRef = useRef(false);
   const runtimeSessionIdRef = useRef(getRuntimeSessionId());
+  const latestRealLoadsRef = useRef([]);
+  const publicStatsFetchPromiseRef = useRef(null);
+  const publicStatsLastFetchAtRef = useRef(0);
+
+  useEffect(() => {
+    latestRealLoadsRef.current = realLoads;
+  }, [realLoads]);
 
   const flushRemoteRuntimeLogs = useCallback(async () => {
     if (remoteLogDisabledRef.current || remoteLogInFlightRef.current) return;
@@ -1463,32 +1472,60 @@ export default function App() {
     if (city) setFilterFrom(city);
   }, [city]);
 
-  const fetchPublicStats = useCallback(async () => {
-    try {
-      const data = await withTimeout(
-        fetchPublicStatsApi(),
-        8000,
-        "Public stats query timeout."
-      );
-      persistPublicStats(data);
-      return;
-    } catch (error) {
-      appendRuntimeLog("warn", "PUBLIC_STATS_SUPABASE_FAIL", error?.message || "Supabase stats failed");
+  const fetchPublicStats = useCallback((options = {}) => {
+    const force = options?.force === true;
+    const now = Date.now();
+
+    if (!force && publicStatsFetchPromiseRef.current) {
+      return publicStatsFetchPromiseRef.current;
+    }
+    if (!force && now - publicStatsLastFetchAtRef.current < PUBLIC_STATS_FETCH_COOLDOWN_MS) {
+      return Promise.resolve(null);
     }
 
-    try {
-      const restData = await fetchPublicStatsViaRestApi({ timeoutMs: 10000 });
-      appendRuntimeLog("info", "PUBLIC_STATS_REST_OK", `loads=${restData.activeLoads} drivers=${restData.activeDrivers} cities=${restData.activeCities}`);
-      persistPublicStats(restData);
-      return;
-    } catch (restError) {
-      console.error("Error fetching public stats:", restError);
-      appendRuntimeLog("warn", "PUBLIC_STATS_REST_FAIL", restError?.message || "REST stats failed");
-    }
+    const request = (async () => {
+      publicStatsLastFetchAtRef.current = Date.now();
+      let supabaseError = null;
 
-    // Local fallback: avoid 0/0 stats when visible data exists.
-    applyLocalStatsFallback(realLoads);
-  }, [appendRuntimeLog, applyLocalStatsFallback, persistPublicStats, realLoads, withTimeout]);
+      try {
+        const data = await withTimeout(
+          fetchPublicStatsApi(),
+          8000,
+          "Public stats query timeout."
+        );
+        persistPublicStats(data);
+        return data;
+      } catch (error) {
+        supabaseError = error;
+      }
+
+      try {
+        const restData = await fetchPublicStatsViaRestApi({ timeoutMs: 10000 });
+        if (supabaseError) {
+          appendRuntimeLog("info", "PUBLIC_STATS_SUPABASE_FALLBACK", supabaseError?.message || "Supabase stats failed, REST fallback used.");
+        }
+        appendRuntimeLog("info", "PUBLIC_STATS_REST_OK", `loads=${restData.activeLoads} drivers=${restData.activeDrivers} cities=${restData.activeCities}`);
+        persistPublicStats(restData);
+        return restData;
+      } catch (restError) {
+        if (supabaseError) {
+          appendRuntimeLog("warn", "PUBLIC_STATS_SUPABASE_FAIL", supabaseError?.message || "Supabase stats failed");
+        }
+        console.error("Error fetching public stats:", restError);
+        appendRuntimeLog("warn", "PUBLIC_STATS_REST_FAIL", restError?.message || "REST stats failed");
+      }
+
+      // Local fallback: avoid 0/0 stats when visible data exists.
+      applyLocalStatsFallback(latestRealLoadsRef.current);
+      return null;
+    })();
+
+    publicStatsFetchPromiseRef.current = request.finally(() => {
+      publicStatsFetchPromiseRef.current = null;
+    });
+
+    return publicStatsFetchPromiseRef.current;
+  }, [appendRuntimeLog, applyLocalStatsFallback, persistPublicStats, withTimeout]);
 
   const fetchLoads = useCallback(async () => {
     setIsLoading(true);
