@@ -96,6 +96,8 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-02", title: "İlan publish tarihinde timezone düzeltmesi yapıldı: pickup_date artık Europe/Istanbul gün anahtarına göre set ediliyor." },
+  { date: "2026-03-01", title: "Feedback panosu manuel moda alındı: yorum ve etiketler Codex tarafından tek tek elle değerlendiriliyor (otomatik karar kapatıldı)." },
   { date: "2026-03-01", title: "Feedback panosunda eski otomatik yorum/tag sonuçları sıfırdan yeniden değerlendiriliyor; yanlış filtrelenen öneriler tekrar etiketleniyor." },
   { date: "2026-03-01", title: "Yük listeleri/istatistik/feed akışlarında pickup_date filtresi eklendi: yalnızca bugün ve gelecek tarihli yükler gösteriliyor." },
   { date: "2026-03-01", title: "Feedback listesi girişte timeout olursa otomatik ikinci deneme eklendi; geçici gecikmelerde kullanıcıya kırmızı hata gösterimi kaldırıldı." },
@@ -143,7 +145,15 @@ const FEEDBACK_FETCH_COOLDOWN_MS = 2400;
 const REPORT_RATE_LIMIT_MS = 5 * 60 * 1000;
 const FEEDBACK_RATE_LIMIT_MS = 45 * 1000;
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "2026.03.01";
-const FEEDBACK_REVIEW_VERSION = 2;
+const FEEDBACK_REVIEW_VERSION = 3;
+
+const getIstanbulDateKey = () => {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Istanbul" }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+};
 
 const DEFAULT_USER_SETTINGS = {
   notificationsEnabled: true,
@@ -265,78 +275,91 @@ const sanitizeFeedbackItems = (items = []) =>
     .filter((item) => item.content.length >= 6)
     .slice(0, 80);
 
-const evaluateFeedbackSubmission = ({ content, releaseUpdates = [] }) => {
-  const text = sanitizeFeedbackText(content);
-  const lower = text.toLocaleLowerCase("tr-TR");
-  const riskyPattern = /(sifre|password|token|admin yetkisi|dogrulamayi kaldir|guvenlik.*kapat|hack|sql inject|ddos)/i;
-  const offTopicPattern = /(bahis|casino|kumar|kripto sinyal|reklam verelim|telegram grubu|takip et kazan)/i;
-  const spamPattern = /(http[s]?:\/\/.*http[s]?:\/\/|bedava takip|hemen para kazan)/i;
+const MANUAL_FEEDBACK_DECISIONS = {
+  10: {
+    statusTag: "yapilacak",
+    moderationStatus: "published",
+    codexComment: "Yaratıcı ama ikincil öncelik. Önce kritik akış bug'larını bitirip sonra açılış animasyonunu iyileştireceğim.",
+  },
+  9: {
+    statusTag: "yapilacak",
+    moderationStatus: "published",
+    codexComment: "Çok iyi öneri. Konuma göre eşleşen şehri üstte göstermek arama deneyimini net iyileştirir; planlandı.",
+  },
+  8: {
+    statusTag: "yapilacak",
+    moderationStatus: "published",
+    codexComment: "Değerli geri bildirim. Şehir yanında aktif ilan sayısı badge'i eklenmesi görev listesine alındı.",
+  },
+  7: {
+    statusTag: "yapilacak",
+    moderationStatus: "published",
+    codexComment: "Aynı öneri daha önce de iletilmiş; tek görev altında birleştirildi ve uygulanacak.",
+  },
+  6: {
+    statusTag: "yapilacak",
+    moderationStatus: "published",
+    codexComment: "Teknik olarak doğru fikir. WebSocket/SSE gerçek zamanlı güncelleme için yol haritasına alındı.",
+  },
+  5: {
+    statusTag: "yapim_asamasinda",
+    moderationStatus: "published",
+    codexComment: "İşlevsiz buton geri bildirimi doğru. Düzeltmeler kademeli ilerliyor; kalan butonlar geliştirme aşamasında.",
+  },
+  4: {
+    statusTag: "yapildi",
+    moderationStatus: "published",
+    codexComment: "Bu talep uygulandı: sistem artık yalnızca bugün ve gelecek tarihli yükleri gösteriyor.",
+  },
+  3: {
+    statusTag: "kotu_fikir",
+    moderationStatus: "filtered",
+    codexComment: "Bu kayıt sadece deneme amaçlı görünüyor; ürün için aksiyon çıkarılmadı.",
+  },
+  2: {
+    statusTag: "kotu_fikir",
+    moderationStatus: "filtered",
+    codexComment: "Bu içerik test doğrulama mesajı, gerçek ürün geri bildirimi değil; filtrelendi.",
+  },
+  1: {
+    statusTag: "kotu_fikir",
+    moderationStatus: "filtered",
+    codexComment: "Bu içerik test doğrulama mesajı, gerçek ürün geri bildirimi değil; filtrelendi.",
+  },
+};
 
-  if (!lower) {
+const normalizeFeedbackStatusTag = (value) =>
+  ["yapildi", "yapilacak", "yapim_asamasinda", "kotu_fikir"].includes(value) ? value : "yapilacak";
+
+const applyManualFeedbackDecision = (item) => {
+  const numericId = Number(item?.id);
+  const decision = Number.isFinite(numericId) ? MANUAL_FEEDBACK_DECISIONS[numericId] : null;
+  const fallbackComment =
+    item?.codex_comment && String(item.codex_comment).trim()
+      ? item.codex_comment
+      : "Codex manuel değerlendirme bekliyor. Yorum ve etiket elle güncellenecek.";
+
+  if (!decision) {
     return {
-      moderationStatus: "filtered",
-      statusTag: "kotu_fikir",
-      codexComment: "Bu içerik boş görünüyor. Daha net bir geri bildirim yazabilirsin.",
-    };
-  }
-
-  if (riskyPattern.test(lower) || offTopicPattern.test(lower) || spamPattern.test(lower)) {
-    return {
-      moderationStatus: "filtered",
-      statusTag: "kotu_fikir",
-      codexComment: "Bu içerik ürün geri bildirimi kapsamında değerlendirilemedi.",
-    };
-  }
-
-  const releaseText = sanitizeReleaseUpdates(releaseUpdates)
-    .map((row) => String(row?.title || "").toLocaleLowerCase("tr-TR"))
-    .join(" ");
-
-  const words = lower.split(/\s+/).filter((word) => word.length > 4);
-  const overlapCount = words.filter((word, idx) => words.indexOf(word) === idx && releaseText.includes(word)).length;
-  const donePattern = /(duzeldi|düzeldi|cozuldu|çözüldü|uygulandi|uygulandı|tamamlandi|tamamlandı|eklendi|yayinda|yayında)/i;
-
-  if (overlapCount >= 2 || donePattern.test(lower)) {
-    return {
-      moderationStatus: "published",
-      statusTag: "yapildi",
-      codexComment: "Yaptım, teşekkür ederim. Bu konu son güncellemelerde uygulandı.",
-    };
-  }
-
-  const actionablePattern =
-    /(hata|bug|calismiyor|çalışmıyor|duzelt|düzelt|iyilestir|iyileştir|ekle|eksik|performans|yavas|yavaş|ui|ux|tasarim|tasarım|bildirim|rol|feed|ilan|teklif|harita|filtre|kayit|kayıt|giris|giriş|buton|konum|lokasyon|sehir|şehir|eşleş|esles|sırala|sirala|önce|once|arama)/i;
-
-  if (actionablePattern.test(lower)) {
-    return {
-      moderationStatus: "published",
-      statusTag: "yapilacak",
-      codexComment: "Güzel fikir. Yeni kuralla yeniden değerlendirildi ve yapılacaklar listesine alındı.",
+      ...item,
+      status_tag: normalizeFeedbackStatusTag(item?.status_tag),
+      moderation_status: item?.moderation_status === "filtered" ? "filtered" : "published",
+      codex_comment: sanitizeFeedbackText(fallbackComment),
+      review_version: FEEDBACK_REVIEW_VERSION,
     };
   }
 
   return {
-    moderationStatus: "published",
-    statusTag: "yapilacak",
-    codexComment: "Güzel fikir. Biraz daha detay eklersen daha hızlı uygulayabilirim.",
+    ...item,
+    status_tag: normalizeFeedbackStatusTag(decision.statusTag),
+    moderation_status: decision.moderationStatus === "filtered" ? "filtered" : "published",
+    codex_comment: sanitizeFeedbackText(decision.codexComment),
+    review_version: FEEDBACK_REVIEW_VERSION,
   };
 };
 
-const retagFeedbackItemsFromScratch = ({ items, releaseUpdates = [] }) =>
-  sanitizeFeedbackItems(items).map((item) => {
-    const triage = evaluateFeedbackSubmission({
-      content: item.content,
-      releaseUpdates,
-    });
-
-    return {
-      ...item,
-      codex_comment: triage.codexComment,
-      status_tag: triage.statusTag,
-      moderation_status: triage.moderationStatus,
-      review_version: FEEDBACK_REVIEW_VERSION,
-    };
-  });
+const retagFeedbackItemsFromScratch = ({ items }) =>
+  sanitizeFeedbackItems(items).map((item) => applyManualFeedbackDecision(item));
 
 const getFeedbackStatusUi = (statusTag) => {
   if (statusTag === "yapildi") {
@@ -363,20 +386,9 @@ const getFeedbackStatusUi = (statusTag) => {
   };
 };
 
-const resolveFeedbackDisplayState = ({ item, releaseUpdates }) => {
+const resolveFeedbackDisplayState = ({ item }) => {
   if (!item) return item;
-  const triage = evaluateFeedbackSubmission({
-    content: item.content,
-    releaseUpdates,
-  });
-
-  return {
-    ...item,
-    moderation_status: triage.moderationStatus,
-    status_tag: triage.statusTag,
-    codex_comment: triage.codexComment,
-    review_version: FEEDBACK_REVIEW_VERSION,
-  };
+  return applyManualFeedbackDecision(item);
 };
 
 const buildFeedbackErrorText = (errorOrMessage = "") => {
@@ -797,11 +809,8 @@ export default function App() {
     return sanitized;
   }, []);
 
-  const persistFeedbackItems = useCallback((nextItems, options = {}) => {
-    const reviewed = retagFeedbackItemsFromScratch({
-      items: nextItems,
-      releaseUpdates: Array.isArray(options?.releaseUpdates) ? options.releaseUpdates : releaseUpdates,
-    });
+  const persistFeedbackItems = useCallback((nextItems) => {
+    const reviewed = retagFeedbackItemsFromScratch({ items: nextItems });
     setFeedbackItems(reviewed);
     try {
       localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(reviewed));
@@ -809,7 +818,7 @@ export default function App() {
       // ignore cache write failures
     }
     return reviewed;
-  }, [releaseUpdates]);
+  }, []);
 
   const applyLocalStatsFallback = useCallback((candidateLoads, options = {}) => {
     const localDerived = deriveStatsFromUiLoads(candidateLoads);
@@ -1702,10 +1711,11 @@ export default function App() {
       // ignore local rate read failures
     }
 
-    const triage = evaluateFeedbackSubmission({
-      content: normalizedInput,
-      releaseUpdates,
-    });
+    const triage = {
+      moderationStatus: "published",
+      statusTag: "yapilacak",
+      codexComment: "Codex manuel değerlendirme bekliyor. Yorum ve etiket elle güncellenecek.",
+    };
 
     setIsPostingFeedback(true);
     try {
@@ -1742,15 +1752,9 @@ export default function App() {
       appendRuntimeLog(
         "info",
         "FEEDBACK_CREATE_OK",
-        `tag=${triage.statusTag} moderation=${triage.moderationStatus}`
+        "manual_review_pending=true"
       );
-      if (triage.statusTag === "kotu_fikir") {
-        showToast("Feedback kaydedildi ve filtrelendi.");
-      } else if (triage.statusTag === "yapildi") {
-        showToast("Feedback için durum: Yaptım ✅");
-      } else {
-        showToast("Feedback alındı. Durum: Yapacağım 🛠️");
-      }
+      showToast("Feedback alındı. Codex manuel inceleme listesine eklendi.");
     } catch (error) {
       const message = error?.message || "Feedback gönderilemedi.";
       if (isFeedbackTableMissingError(error)) {
@@ -1840,7 +1844,6 @@ export default function App() {
     nav,
     profile?.full_name,
     pushPersistentError,
-    releaseUpdates,
     screen,
     user?.email,
     user?.id,
@@ -2479,7 +2482,7 @@ export default function App() {
         is_urgent: false,
         is_fleet: empForm.fleet,
         truck_count: empForm.fleet ? Number(empForm.trucks) || 1 : 1,
-        pickup_date: new Date().toISOString().split('T')[0],
+        pickup_date: getIstanbulDateKey(),
         employer_id: user.id,
         status: "open",
         currency: "TRY",
@@ -2756,10 +2759,9 @@ export default function App() {
         .map((item) =>
           resolveFeedbackDisplayState({
             item,
-            releaseUpdates,
           })
         ),
-    [feedbackItems, releaseUpdates]
+    [feedbackItems]
   );
   const showDriverHomeAction = !user || (Boolean(user) && !activeRole);
   const showEmployerHomeAction = !user || (Boolean(user) && !activeRole);
@@ -3085,7 +3087,7 @@ export default function App() {
                     <span className="text-[10px] text-slate-500 font-bold">HERKESE AÇIK</span>
                   </div>
                   <p className="text-slate-400 text-[11px] leading-relaxed mb-3">
-                    1. kolon kullanıcı önerisi, 2. kolon Codex yeniden değerlendirme yorumu, 3. kolon yeniden etiketlenmiş durumdur.
+                    1. kolon kullanıcı önerisi, 2. kolon Codex'in manuel yorumu, 3. kolon manuel verilen durum etiketidir.
                   </p>
 
                   <div className="space-y-2 mb-3">
