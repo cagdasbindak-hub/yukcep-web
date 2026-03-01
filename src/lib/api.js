@@ -313,7 +313,8 @@ export const createBidApi = async ({ loadId, driverId, price }) => {
 
   const message = String(first.error?.message || "").toLowerCase();
   if (message.includes("updated_at")) {
-    const { updated_at, ...fallbackPayload } = payload;
+    const fallbackPayload = { ...payload };
+    delete fallbackPayload.updated_at;
     const retry = await supabase.from("bids").insert([fallbackPayload]).select().single();
     return unwrap(retry, "Failed to submit bid");
   }
@@ -352,13 +353,21 @@ export const updateBidStatusApi = async ({ bidId, status }) => {
 };
 
 export const updateLoadStatusApi = async ({ loadId, status }) => {
-  const res = await supabase
+  const transitionAttempt = await supabase.rpc("set_load_status_with_transition", {
+    p_load_id: loadId,
+    p_next_status: status,
+  });
+  if (!transitionAttempt.error && Array.isArray(transitionAttempt.data) && transitionAttempt.data[0]) {
+    return transitionAttempt.data[0];
+  }
+
+  const fallback = await supabase
     .from("loads")
     .update({ status })
     .eq("id", loadId)
     .select("id, status")
     .single();
-  return unwrap(res, "Failed to update load status");
+  return unwrap(fallback, "Failed to update load status");
 };
 
 const patchViaRestApi = async ({ table, key, value, payload, accessToken, timeoutMs }) => {
@@ -532,8 +541,11 @@ export const createNotificationViaRestApi = async ({
 export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => {
   let query = supabase
     .from("loads")
-    .select("*")
-    .order("created_at", { ascending: false });
+    .select(
+      "id, employer_id, origin_city, destination_city, distance_km, load_type, trailer_type, weight_kg, price, currency, kdv_included, status, pickup_date, created_at, is_urgent, is_fleet, truck_count"
+    )
+    .order("created_at", { ascending: false })
+    .limit(300);
 
   // Trailer tipi net bir enum oldugu icin DB tarafinda filtrelenebilir.
   if (filterTrailer) query = query.eq("trailer_type", filterTrailer);
@@ -589,8 +601,12 @@ export const fetchLoadsViaRestApi = async ({
   };
 
   const query = new URLSearchParams();
-  query.set("select", "*");
+  query.set(
+    "select",
+    "id,employer_id,origin_city,destination_city,distance_km,load_type,trailer_type,weight_kg,price,currency,kdv_included,status,pickup_date,created_at,is_urgent,is_fleet,truck_count"
+  );
   query.set("order", "created_at.desc");
+  query.set("limit", "300");
   if (filterTrailer) {
     query.set("trailer_type", `eq.${filterTrailer}`);
   }
@@ -807,7 +823,8 @@ export const createBidViaRestApi = async ({ loadId, driverId, price, accessToken
   } catch (error) {
     const message = String(error?.message || "").toLowerCase();
     if (message.includes("updated_at")) {
-      const { updated_at, ...fallbackPayload } = payload;
+      const fallbackPayload = { ...payload };
+      delete fallbackPayload.updated_at;
       return await postBidViaRest({ payload: fallbackPayload, accessToken, timeoutMs });
     }
     throw error;
@@ -815,6 +832,15 @@ export const createBidViaRestApi = async ({ loadId, driverId, price, accessToken
 };
 
 export const fetchPublicStatsApi = async () => {
+  const fast = await supabase.rpc("get_public_stats_fast");
+  if (!fast.error && Array.isArray(fast.data) && fast.data[0]) {
+    return {
+      activeLoads: Number(fast.data[0].active_loads) || 0,
+      activeDrivers: Number(fast.data[0].active_drivers) || 0,
+      activeCities: Number(fast.data[0].active_cities) || 0,
+    };
+  }
+
   const [loadsRes, driversRes] = await Promise.all([
     supabase.from("loads").select("id, status, origin_city, destination_city"),
     supabase.from("profiles").select("id, role"),
@@ -1239,4 +1265,20 @@ export const updateProfileRoleApi = async ({ userId, role }) => {
     .select("*")
     .single();
   return unwrap(res, "Failed to update profile role");
+};
+
+export const createAbuseReportApi = async ({ loadId, reporterId, reason, details }) => {
+  const res = await supabase
+    .from("abuse_reports")
+    .insert([
+      {
+        load_id: loadId || null,
+        reporter_id: reporterId,
+        reason: String(reason || "").trim(),
+        details: details ? String(details).trim() : null,
+      },
+    ])
+    .select("id, status, created_at")
+    .single();
+  return unwrap(res, "Failed to create abuse report");
 };

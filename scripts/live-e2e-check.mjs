@@ -23,6 +23,7 @@ const employerPhone = `0533${seed.slice(-7)}`;
 const password = `YukCep!${seed.slice(-6)}Aa`;
 const driverFeedActionPattern = /İş Arıyorum Feed'e Git|Benim Yapacak İşlerim/i;
 const employerFeedActionPattern = /İşveren Feed'e Git/i;
+const driverFeedHeadingPattern = /İş Arıyorum Feed|Benim Yapacak İşlerim/i;
 
 const employer = {
   fullName: `E2E Isveren ${seed.slice(-6)}`,
@@ -193,7 +194,7 @@ const openDriverLocationAndList = async (page) => {
   const driverFeedButton = page.getByRole("button", { name: driverFeedActionPattern });
   await ensureVisible(driverFeedButton, 20000, "İş arıyorum feed butonu bulunamadı.");
   await driverFeedButton.click();
-  await ensureVisible(page.getByRole("heading", { name: /İş Arıyorum Feed/i }), 25000, "Şoför feed ekranı açılmadı.");
+  await ensureVisible(page.getByRole("heading", { name: driverFeedHeadingPattern }), 25000, "Şoför feed ekranı açılmadı.");
   await page.getByRole("button", { name: /Yük Ara/i }).click();
   await ensureVisible(page.getByRole("heading", { name: /Neredesiniz/i }), 25000, "Lokasyon ekranı açılmadı.");
 
@@ -399,7 +400,7 @@ const acceptBidOnEmployerPanel = async (page) => {
 const verifyDriverFeedAccepted = async (page) => {
   await waitForWelcomeReady(page);
   await page.getByRole("button", { name: driverFeedActionPattern }).click();
-  await ensureVisible(page.getByRole("heading", { name: /İş Arıyorum Feed/i }), 30000, "Şoför feed ekranı açılmadı.");
+  await ensureVisible(page.getByRole("heading", { name: driverFeedHeadingPattern }), 30000, "Şoför feed ekranı açılmadı.");
   await page.getByRole("button", { name: /^Yenile$/i }).click();
 
   const card = page.locator("div", { hasText: loadType }).first();
@@ -418,7 +419,7 @@ const verifyDriverFeedAccepted = async (page) => {
 const verifyDriverFeedPending = async (page) => {
   await waitForWelcomeReady(page);
   await page.getByRole("button", { name: driverFeedActionPattern }).click();
-  await ensureVisible(page.getByRole("heading", { name: /İş Arıyorum Feed/i }), 30000, "Şoför feed ekranı açılmadı.");
+  await ensureVisible(page.getByRole("heading", { name: driverFeedHeadingPattern }), 30000, "Şoför feed ekranı açılmadı.");
   await page.getByRole("button", { name: /^Yenile$/i }).click();
 
   const card = page.locator("div", { hasText: loadType }).first();

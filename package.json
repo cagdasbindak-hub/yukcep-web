@@ -10,7 +10,12 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "health:check": "node scripts/health-check.mjs",
+    "smoke": "node scripts/smoke-check.mjs",
+    "a11y:smoke": "node scripts/a11y-smoke.mjs",
+    "e2e:live": "node scripts/live-e2e-check.mjs",
+    "ci:check": "npm run lint && npm run build && npm run smoke"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.95.3",

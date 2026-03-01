@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import { MessageSquare, MapPin, Truck, RefreshCw, Calendar, Package, ArrowLeft, AlertCircle, CheckCircle, LogOut, User, Bell } from 'lucide-react';
 import { supabase, SUPABASE_URL } from './lib/supabase';
 import {
+  createAbuseReportApi,
   createBidApi,
   createBidViaRestApi,
   createLoadApi,
@@ -32,13 +33,14 @@ import {
   updateBidStatusViaRestApi,
 } from './lib/api';
 import { mapDbToUi } from './lib/loadMapper';
-import AuthScreen from './components/AuthScreen';
 import SplashScreen from './components/SplashScreen';
-import Confetti from './components/Confetti';
-import TurkeyHeatmap from './components/TurkeyHeatmap';
 import SkeletonLoadCard from './components/SkeletonLoadCard';
 import { TURKEY_CITY_NAMES, normalizeCityKey } from './lib/turkeyGeoData';
 import './App.css';
+
+const AuthScreen = lazy(() => import('./components/AuthScreen'));
+const Confetti = lazy(() => import('./components/Confetti'));
+const TurkeyHeatmap = lazy(() => import('./components/TurkeyHeatmap'));
 
 // ─── DATA ───
 const cities = [...TURKEY_CITY_NAMES].sort((a, b) => a.localeCompare(b, "tr-TR"));
@@ -92,6 +94,10 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Launch hardening: CI (lint/build/smoke/a11y), post-deploy smoke ve health-check otomasyonu eklendi." },
+  { date: "2026-03-01", title: "İlanı Raporla akışı eklendi; aynı kullanıcı/ilan için 5 dakika anti-spam cooldown aktif." },
+  { date: "2026-03-01", title: "İşveren Feed'e kanban hızlı bakış kartları (bekleyen/kabul/red) eklendi." },
+  { date: "2026-03-01", title: "Ayarlar paneline telefon doğrulama zorunluluğu eklendi; teklif/ilan aksiyonlarında policy gate aktif." },
   { date: "2026-03-01", title: "Ana sayfada sürücü için Benim Yapacak İşlerim + Yeni İş Ara aksiyonu eklendi; rol değişimlerinde açıklama popupı getirildi." },
   { date: "2026-03-01", title: "Oturum açılışında profil rolü timeout’a dayanıklı hale getirildi; rol çözülemezse ana sayfada rol seçimi ile bloktan çıkış sağlandı." },
   { date: "2026-03-01", title: "Yük listesi sorgusu tekilleştirildi; REST fallback başarılı olduğunda çift WARN/INFO log tekrarları azaltıldı." },
@@ -117,10 +123,21 @@ const LOG_STORAGE_KEY = "yukcep_runtime_logs_v1";
 const PUBLIC_STATS_CACHE_KEY = "yukcep_public_stats_cache_v1";
 const RELEASE_UPDATES_KEY = "yukcep_release_updates_v1";
 const ROLE_HINT_KEY = "yukcep_profile_role_hint_v1";
+const SETTINGS_KEY = "yukcep_user_settings_v1";
 const REMOTE_LOG_FLUSH_SIZE = 6;
 const REMOTE_LOG_FLUSH_DELAY_MS = 2200;
 const PUBLIC_STATS_FETCH_COOLDOWN_MS = 2500;
 const LOADS_FETCH_COOLDOWN_MS = 1800;
+const REPORT_RATE_LIMIT_MS = 5 * 60 * 1000;
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || "2026.03.01";
+
+const DEFAULT_USER_SETTINGS = {
+  notificationsEnabled: true,
+  language: "tr",
+  hidePhoneOnCards: false,
+  requireEmailVerified: false,
+  requirePhoneOnActions: false,
+};
 
 const normalizeRoleHint = (role) => {
   if (role === "employer") return "employer";
@@ -281,6 +298,16 @@ const FreshTag = ({ d }) => {
   return <span className={`${c} text-xs font-bold`}>{l}</span>;
 };
 
+const estimateEtaLabel = (distanceValue) => {
+  const km = Number(String(distanceValue || "").replace(/[^\d.]/g, ""));
+  if (!km || Number.isNaN(km)) return "ETA hesaplanamadı";
+  const totalHours = (km / 65) + 1.5; // ortalama yol + yükleme/boşaltma tamponu
+  if (totalHours < 24) return `ETA ~${Math.ceil(totalHours)} saat`;
+  const days = Math.floor(totalHours / 24);
+  const hours = Math.ceil(totalHours % 24);
+  return `ETA ~${days}g ${hours}s`;
+};
+
 const DemorajBar = ({ hours }) => {
   const pct = Math.min((hours / 10) * 100, 100);
   const clr = hours <= 3 ? "#059669" : hours <= 5 ? "#f59e0b" : "#ef4444";
@@ -375,6 +402,7 @@ export default function App() {
   const [selectedLoadDetail, setSelectedLoadDetail] = useState(null);
   const [driverFeedItems, setDriverFeedItems] = useState([]);
   const [employerFeedItems, setEmployerFeedItems] = useState([]);
+  const [driverFeedTab, setDriverFeedTab] = useState("all");
   const [isFeedLoading, setIsFeedLoading] = useState(false);
   const [feedError, setFeedError] = useState("");
 
@@ -388,12 +416,15 @@ export default function App() {
   const [hasBid, setHasBid] = useState(false);
   const [loadBids, setLoadBids] = useState([]);
   const [isProcessingBid, setIsProcessingBid] = useState(false);
+  const [isReportingLoad, setIsReportingLoad] = useState(false);
   const [isPostingLoad, setIsPostingLoad] = useState(false);
   const [postLoadError, setPostLoadError] = useState("");
+  const [persistentError, setPersistentError] = useState(null);
   const [runtimeLogs, setRuntimeLogs] = useState([]);
   const [showRuntimeLogs, setShowRuntimeLogs] = useState(false);
   const [releaseUpdates, setReleaseUpdates] = useState(RELEASE_UPDATES_SEED);
   const [roleSwitchPopup, setRoleSwitchPopup] = useState(null);
+  const [userSettings, setUserSettings] = useState(DEFAULT_USER_SETTINGS);
   const remoteLogQueueRef = useRef([]);
   const remoteLogTimerRef = useRef(null);
   const remoteLogFlushRef = useRef(null);
@@ -523,7 +554,7 @@ export default function App() {
         session_id: runtimeSessionIdRef.current,
         user_id: user?.id || null,
         screen: screen || null,
-        app_version: "2026.02.28",
+        app_version: APP_VERSION,
       });
     }
   }, [enqueueRemoteRuntimeLog, screen, user?.id]);
@@ -672,6 +703,40 @@ export default function App() {
   }, [persistReleaseUpdates]);
 
   useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        setUserSettings({
+          ...DEFAULT_USER_SETTINGS,
+          ...parsed,
+        });
+      }
+    } catch {
+      // ignore malformed settings
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(userSettings));
+    } catch {
+      // ignore settings write failures
+    }
+  }, [userSettings]);
+
+  useEffect(() => {
+    const hasOverlay = showSettingsPanel || showProfileCard || showNotifications || Boolean(roleSwitchPopup);
+    if (!hasOverlay) return undefined;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [roleSwitchPopup, showNotifications, showProfileCard, showSettingsPanel]);
+
+  useEffect(() => {
     const flushNow = () => {
       remoteLogFlushRef.current?.();
     };
@@ -739,7 +804,9 @@ export default function App() {
             const newNotif = payload.new;
             setNotifications((prev) => [newNotif, ...prev]);
             setUnreadCount((prev) => prev + 1);
-            showToast(`🔔 ${newNotif.message}`);
+            if (userSettings.notificationsEnabled) {
+              showToast(`🔔 ${newNotif.message}`);
+            }
           }
         )
         .subscribe();
@@ -751,7 +818,7 @@ export default function App() {
       setNotifications([]);
       setUnreadCount(0);
     }
-  }, [user, fetchNotifications]);
+  }, [fetchNotifications, user, userSettings.notificationsEnabled]);
 
   const markNotificationRead = async (id) => {
     const wasUnread = notifications.find((n) => n.id === id)?.is_read === false;
@@ -824,6 +891,7 @@ export default function App() {
     if (screen === "map") return "location";
     if (screen === "location") return "welcome";
     if (screen === "employer") return "welcome";
+    if (screen === "legal" || screen === "support") return "welcome";
     if (screen === "fleet" || screen === "calendar") return "map";
     if (screen === "driverFeed" || screen === "employerFeed") return "welcome";
     return prevScreen === "employer" ? "employer" : "welcome";
@@ -1008,6 +1076,16 @@ export default function App() {
 
   const submitBid = async () => {
     if (!user || !selectedLoadDetail || !bidPrice) return;
+    if (userSettings.requireEmailVerified && !isEmailVerified) {
+      showToast("Teklif için e-posta doğrulaması gerekli.", "error");
+      pushPersistentError("EMAIL_VERIFY", "E-posta doğrulanmadan teklif gönderilemez.");
+      return;
+    }
+    if (userSettings.requirePhoneOnActions && !hasVerifiedPhone) {
+      showToast("Teklif için geçerli telefon bilgisi gerekli.", "error");
+      pushPersistentError("PHONE_VERIFY", "Telefon doğrulaması olmadan teklif gönderilemez.");
+      return;
+    }
     setIsProcessingBid(true);
 
     const price = parseFloat(bidPrice);
@@ -1109,6 +1187,7 @@ export default function App() {
       console.error("Error submitting bid:", e);
       appendRuntimeLog("error", "BID_SUBMIT_FAIL", e?.message || "Bid submit failed");
       showToast("Teklif gönderilemedi", "error");
+      pushPersistentError("BID_SUBMIT", e?.message || "Teklif gönderilemedi.");
     } finally {
       setIsProcessingBid(false);
     }
@@ -1245,6 +1324,7 @@ export default function App() {
       console.error("Error responding to bid:", e);
       appendRuntimeLog("error", "BID_DECISION_FAIL", e?.message || "Bid decision failed");
       showToast("İşlem başarısız", "error");
+      pushPersistentError("BID_DECISION", e?.message || "Teklif yanıt işlemi başarısız.");
     }
   };
 
@@ -1284,6 +1364,87 @@ export default function App() {
     const ttl = typeof durationMs === "number" ? durationMs : (type === "error" ? 9000 : 3000);
     setTimeout(() => setToast(null), ttl);
   };
+
+  const pushPersistentError = useCallback((source, message) => {
+    const detail = String(message || "Beklenmeyen hata").trim();
+    setPersistentError({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      source: String(source || "SYSTEM"),
+      message: detail,
+      at: new Date().toISOString(),
+    });
+  }, []);
+
+  const updateUserSetting = useCallback((key, value) => {
+    setUserSettings((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
+  }, []);
+
+  const handleReportLoad = useCallback(async () => {
+    if (!selectedLoadDetail?.id) return;
+    if (!user?.id) {
+      showToast("İlan raporlamak için giriş yapmalısın.", "error");
+      nav("auth");
+      return;
+    }
+    if (isReportingLoad) return;
+
+    const rateKey = `yukcep_report_rate_v1:${user.id}:${selectedLoadDetail.id}`;
+    const nowTs = Date.now();
+    try {
+      const previousTs = Number(localStorage.getItem(rateKey) || "0");
+      if (previousTs && nowTs - previousTs < REPORT_RATE_LIMIT_MS) {
+        const waitMin = Math.max(1, Math.ceil((REPORT_RATE_LIMIT_MS - (nowTs - previousTs)) / 60000));
+        showToast(`Aynı ilan için tekrar rapor öncesi ${waitMin} dk bekleyin.`, "error");
+        return;
+      }
+    } catch {
+      // ignore cache parse/storage issues
+    }
+
+    const reason = window.prompt(
+      "Rapor nedeni (en az 6 karakter):",
+      "Şüpheli ilan / yanlış bilgi"
+    );
+    if (!reason) return;
+
+    setIsReportingLoad(true);
+    try {
+      await withTimeout(
+        createAbuseReportApi({
+          loadId: selectedLoadDetail.id,
+          reporterId: user.id,
+          reason,
+          details: `${selectedLoadDetail.from} -> ${selectedLoadDetail.to}`,
+        }),
+        10000,
+        "Rapor gönderimi zaman aşımına uğradı (10sn)."
+      );
+      try {
+        localStorage.setItem(rateKey, String(nowTs));
+      } catch {
+        // ignore cache write failures
+      }
+      appendRuntimeLog("warn", "ABUSE_REPORT_CREATED", `load_id=${selectedLoadDetail.id}`);
+      showToast("Rapor alındı. Güvenlik ekibi inceleyecek.");
+    } catch (error) {
+      appendRuntimeLog("error", "ABUSE_REPORT_FAILED", error?.message || "Abuse report failed");
+      pushPersistentError("ABUSE_REPORT", error?.message || "İlan raporu gönderilemedi.");
+      showToast("Rapor gönderilemedi.", "error");
+    } finally {
+      setIsReportingLoad(false);
+    }
+  }, [
+    appendRuntimeLog,
+    isReportingLoad,
+    nav,
+    pushPersistentError,
+    selectedLoadDetail,
+    user?.id,
+    withTimeout,
+  ]);
 
   useEffect(() => {
     if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -1412,6 +1573,8 @@ export default function App() {
     showToast("✅ Giriş başarılı!");
   };
   const activeRole = normalizeRoleHint(profile?.role) || (user ? readRoleHint(user.id) : null);
+  const isEmailVerified = Boolean(user?.email_confirmed_at);
+  const hasVerifiedPhone = /\d{10,}/.test(String(profile?.phone || "").replace(/\D/g, ""));
 
   const getInitials = (name) => {
     if (!name) return "?";
@@ -1558,6 +1721,7 @@ export default function App() {
         }
         console.error("Error fetching public stats:", restError);
         appendRuntimeLog("warn", "PUBLIC_STATS_REST_FAIL", restError?.message || "REST stats failed");
+        pushPersistentError("PUBLIC_STATS", restError?.message || "Canlı sayaçlar güncellenemedi.");
       }
 
       // Local fallback: avoid 0/0 stats when visible data exists.
@@ -1570,7 +1734,7 @@ export default function App() {
     });
 
     return publicStatsFetchPromiseRef.current;
-  }, [appendRuntimeLog, applyLocalStatsFallback, persistPublicStats, withTimeout]);
+  }, [appendRuntimeLog, applyLocalStatsFallback, persistPublicStats, pushPersistentError, withTimeout]);
 
   const fetchLoads = useCallback((options = {}) => {
     const force = options?.force === true;
@@ -1630,6 +1794,7 @@ export default function App() {
         }
         console.error("Error fetching loads:", restError);
         appendRuntimeLog("error", "LOADS_FETCH_FAIL", restError?.message || "Loads fetch failed");
+        pushPersistentError("LOADS", restError?.message || "Yük listesi güncellenemedi.");
         return null;
       } finally {
         setIsLoading(false);
@@ -1641,7 +1806,7 @@ export default function App() {
     });
 
     return loadsFetchPromiseRef.current;
-  }, [appendRuntimeLog, filterFrom, filterTo, filterTrailer, withTimeout]);
+  }, [appendRuntimeLog, filterFrom, filterTo, filterTrailer, pushPersistentError, withTimeout]);
 
   // Fetch Loads from Supabase
   useEffect(() => {
@@ -1712,6 +1877,21 @@ export default function App() {
       setPostLoadError("Oturum bulunamadı. Lütfen tekrar giriş yapın.");
       showToast("İlan vermek için giriş yapmalısınız.", "error");
       nav("auth");
+      return;
+    }
+
+    if (userSettings.requireEmailVerified && !isEmailVerified) {
+      appendRuntimeLog("warn", "POST_LOAD_EMAIL_VERIFY_REQUIRED", "Email doğrulama gerekli.");
+      setPostLoadError("İlan vermek için e-posta doğrulaması gereklidir.");
+      showToast("İlan için e-posta doğrulaması gerekli.", "error");
+      pushPersistentError("EMAIL_VERIFY", "E-posta doğrulanmadan ilan verilemez.");
+      return;
+    }
+    if (userSettings.requirePhoneOnActions && !hasVerifiedPhone) {
+      appendRuntimeLog("warn", "POST_LOAD_PHONE_VERIFY_REQUIRED", "Phone doğrulama gerekli.");
+      setPostLoadError("İlan vermek için geçerli telefon bilgisi gereklidir.");
+      showToast("İlan için geçerli telefon gerekli.", "error");
+      pushPersistentError("PHONE_VERIFY", "Telefon doğrulanmadan ilan verilemez.");
       return;
     }
 
@@ -1895,6 +2075,7 @@ export default function App() {
       appendRuntimeLog("error", "POST_LOAD_FAILED", backendMessage);
       setPostLoadError(backendMessage);
       showToast(`❌ Hata: ${backendMessage}`, "error");
+      pushPersistentError("POST_LOAD", backendMessage);
     } finally {
       setIsPostingLoad(false);
       appendRuntimeLog("info", "POST_LOAD_FINISHED", `isPostingLoad=false | elapsed_ms=${Date.now() - startTs}`);
@@ -1956,6 +2137,41 @@ export default function App() {
     );
   }, [notifications, selectedLoadDetail, user]);
   const employerBidRows = loadBids.length > 0 ? loadBids : employerNotificationBids;
+  const driverFeedBuckets = useMemo(() => {
+    const classify = (item) => {
+      const loadStatus = String(item?.load_status || "").toLowerCase();
+      const bidStatus = String(item?.bid_status || "").toUpperCase();
+      if (["completed", "cancelled"].includes(loadStatus) || bidStatus === "REJECTED") return "completed";
+      if (bidStatus === "ACCEPTED" || ["assigned", "in_transit", "delivered"].includes(loadStatus)) return "planned";
+      return "active";
+    };
+
+    return driverFeedItems.reduce(
+      (acc, item) => {
+        const bucket = classify(item);
+        acc[bucket].push(item);
+        acc.all.push(item);
+        return acc;
+      },
+      { all: [], active: [], planned: [], completed: [] }
+    );
+  }, [driverFeedItems]);
+  const visibleDriverFeedItems = driverFeedBuckets[driverFeedTab] || driverFeedBuckets.all;
+  const employerBidBoard = useMemo(() => {
+    const flattened = employerFeedItems.flatMap((item) =>
+      (item?.bids || []).map((bid) => ({
+        ...bid,
+        load_id: item.load_id,
+        origin_city: item.origin_city,
+        destination_city: item.destination_city,
+      }))
+    );
+    return {
+      pending: flattened.filter((x) => x.bid_status === "PENDING"),
+      accepted: flattened.filter((x) => x.bid_status === "ACCEPTED"),
+      rejected: flattened.filter((x) => x.bid_status === "REJECTED"),
+    };
+  }, [employerFeedItems]);
 
   const e2eChecklist = useMemo(() => {
     const recentErrors = runtimeLogs.slice(0, 40).filter((log) => log.level === "error");
@@ -2002,13 +2218,34 @@ export default function App() {
       {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
 
       {/* CONFETTI */}
-      <Confetti active={showConfetti} />
+      <Suspense fallback={null}>
+        <Confetti active={showConfetti} />
+      </Suspense>
 
       {/* TOAST */}
       {toast && (
         <div className={`yc-toast fixed top-5 left-1/2 -translate-x-1/2 z-[100] px-6 py-4 rounded-2xl font-bold text-sm shadow-2xl animate-bounce flex items-center gap-3 ${toastType === 'error' ? 'bg-red-500 text-white' : 'bg-emerald-500 text-white'}`}>
           {toastType === 'error' ? <AlertCircle size={20} /> : <CheckCircle size={20} />}
           {toast}
+        </div>
+      )}
+
+      {persistentError && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[101] w-[min(92vw,560px)] rounded-2xl border border-red-500/40 bg-red-950/90 backdrop-blur-sm shadow-2xl p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-red-200 text-sm font-black">Kritik Hata · {persistentError.source}</p>
+              <p className="text-red-100 text-xs mt-1 leading-relaxed">{persistentError.message}</p>
+              <p className="text-red-300/80 text-[10px] mt-2">{new Date(persistentError.at).toLocaleString("tr-TR")}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPersistentError(null)}
+              className="px-3 py-1.5 rounded-lg bg-red-500/20 border border-red-500/40 text-red-100 text-xs font-bold"
+            >
+              Kapat
+            </button>
+          </div>
         </div>
       )}
 
@@ -2141,6 +2378,9 @@ export default function App() {
                                 >
                                   {activeRole === "driver" ? "🚛 İş Arıyorum" : activeRole === "employer" ? "🏢 İşverenim" : "⏳ Rol Yükleniyor"}
                                 </span>
+                                <p className={`mt-1 text-[10px] font-bold ${isEmailVerified ? "text-emerald-300" : "text-amber-300"}`}>
+                                  {isEmailVerified ? "✔ E-posta doğrulandı" : "⚠ E-posta doğrulaması bekleniyor"}
+                                </p>
                               </div>
                             </div>
                           </div>
@@ -2400,8 +2640,8 @@ export default function App() {
             <div className="p-5 pb-20">
               <div className="flex items-start justify-between mb-4">
                 <div>
-                  <h2 className="text-white text-3xl font-black tracking-tight">🧭 İş Arıyorum Feed</h2>
-                  <p className="text-slate-400 text-sm mt-1">Tekliflerim, kararlar ve planlanan yükleme tarihleri.</p>
+                  <h2 className="text-white text-3xl font-black tracking-tight">🧭 Benim Yapacak İşlerim</h2>
+                  <p className="text-slate-400 text-sm mt-1">Aktif teklifler, planlanan yükler ve tamamlanan işler.</p>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -2421,6 +2661,28 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-4 gap-2 mb-3">
+                {[
+                  { key: "all", label: "Tümü", count: driverFeedBuckets.all.length },
+                  { key: "active", label: "Aktif", count: driverFeedBuckets.active.length },
+                  { key: "planned", label: "Planlı", count: driverFeedBuckets.planned.length },
+                  { key: "completed", label: "Biten", count: driverFeedBuckets.completed.length },
+                ].map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setDriverFeedTab(tab.key)}
+                    className={`py-2 rounded-xl border text-[11px] font-black ${
+                      driverFeedTab === tab.key
+                        ? "bg-cyan-500/20 text-cyan-200 border-cyan-500/40"
+                        : "bg-slate-800 text-slate-300 border-slate-700"
+                    }`}
+                  >
+                    {tab.label} ({tab.count})
+                  </button>
+                ))}
+              </div>
+
               {feedError && (
                 <div className="mb-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
                   <p className="text-red-300 text-xs font-bold">{feedError}</p>
@@ -2433,13 +2695,13 @@ export default function App() {
                     <SkeletonLoadCard />
                     <SkeletonLoadCard />
                   </>
-                ) : driverFeedItems.length === 0 ? (
+                ) : visibleDriverFeedItems.length === 0 ? (
                   <div className="p-5 rounded-2xl bg-slate-800/50 border border-slate-700/50 text-center">
-                    <p className="text-white font-bold">Henüz teklif geçmişi yok</p>
-                    <p className="text-slate-400 text-sm mt-1">Yük ekranından teklif verdiğinde burada görünecek.</p>
+                    <p className="text-white font-bold">Bu sekmede kayıt yok</p>
+                    <p className="text-slate-400 text-sm mt-1">Yeni iş ara veya farklı sekmeyi kontrol et.</p>
                   </div>
                 ) : (
-                  driverFeedItems.map((item) => {
+                  visibleDriverFeedItems.map((item) => {
                     const bidUi = getBidStatusUi(item.bid_status);
                     return (
                       <div key={`driver-feed-${item.bid_id}`} className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
@@ -2529,6 +2791,44 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30">
+                  <p className="text-[10px] text-amber-200 font-bold uppercase">Bekleyen Teklif</p>
+                  <p className="text-lg text-amber-300 font-black mt-1">{employerBidBoard.pending.length}</p>
+                </div>
+                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+                  <p className="text-[10px] text-emerald-200 font-bold uppercase">Kabul</p>
+                  <p className="text-lg text-emerald-300 font-black mt-1">{employerBidBoard.accepted.length}</p>
+                </div>
+                <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30">
+                  <p className="text-[10px] text-red-200 font-bold uppercase">Red</p>
+                  <p className="text-lg text-red-300 font-black mt-1">{employerBidBoard.rejected.length}</p>
+                </div>
+              </div>
+
+              {employerBidBoard.pending.length > 0 && (
+                <div className="mb-3 p-3 rounded-2xl bg-slate-900/60 border border-slate-700/50">
+                  <p className="text-slate-200 text-xs font-black mb-2">Kanban Hızlı Bakış · Bekleyen</p>
+                  <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                    {employerBidBoard.pending.slice(0, 6).map((bid) => (
+                      <button
+                        key={`pending-bid-${bid.bid_id}`}
+                        type="button"
+                        onClick={() => handleLoadClick(bid.load_id)}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-left"
+                      >
+                        <p className="text-slate-100 text-xs font-bold truncate">
+                          {bid.origin_city} → {bid.destination_city}
+                        </p>
+                        <p className="text-amber-300 text-[11px] font-semibold">
+                          {bid.driver_name} · {fmt(Number(bid.bid_price || 0))} ₺
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {feedError && (
                 <div className="mb-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
@@ -2724,12 +3024,14 @@ export default function App() {
               </div>
 
               {/* Turkey Heatmap - Interactive */}
-              <TurkeyHeatmap
-                loads={loads}
-                onCityClick={(cityName) => { setCity(cityName); }}
-                selectedLoad={selectedLoad}
-                onLoadSelect={(l) => { setSelectedLoad(l); setDetailTab("detail"); }}
-              />
+              <Suspense fallback={<div className="mx-4 h-[250px] rounded-2xl bg-slate-900/40 border border-slate-700/40 animate-pulse" />}>
+                <TurkeyHeatmap
+                  loads={loads}
+                  onCityClick={(cityName) => { setCity(cityName); }}
+                  selectedLoad={selectedLoad}
+                  onLoadSelect={(l) => { setSelectedLoad(l); setDetailTab("detail"); }}
+                />
+              </Suspense>
 
               {/* Load List - Modern Card Design */}
               <div className="px-4 space-y-3 pb-6">
@@ -2790,9 +3092,10 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between text-xs font-semibold text-slate-400">
+                      <div className="flex items-center justify-between text-xs font-semibold text-slate-400 gap-2">
                         <span className="flex items-center gap-1.5"><Package size={14} /> {l.type}</span>
                         <span className="flex items-center gap-1.5">⚖️ {l.weight}</span>
+                        <span className="text-cyan-300 text-[11px] font-bold">{estimateEtaLabel(l.distance)}</span>
                         <span className="text-blue-400">{l.employer}</span>
                       </div>
                     </div>
@@ -2993,9 +3296,11 @@ export default function App() {
                     <div>
                       <p className="text-white font-bold text-lg">{selectedLoadDetail.employerName}</p>
                       <p className="text-slate-400 text-sm font-mono">
-                        {selectedLoadDetail.employerPhone 
-                          ? selectedLoadDetail.employerPhone.replace(/(\d{4})(\d{3})(\d{2})(\d{2})/, "$1 *** ** $4")
-                          : "Numara Gizli"}
+                        {userSettings.hidePhoneOnCards
+                          ? "Numara kullanıcı ayarında gizli"
+                          : selectedLoadDetail.employerPhone
+                            ? selectedLoadDetail.employerPhone.replace(/(\d{4})(\d{3})(\d{2})(\d{2})/, "$1 *** ** $4")
+                            : "Numara Gizli"}
                       </p>
                       <span className={`inline-flex mt-1 px-2 py-0.5 rounded text-[10px] font-bold border ${
                         selectedLoadDetail.employerRole === 'driver' 
@@ -3121,28 +3426,44 @@ export default function App() {
                   ) : (
                     /* Visitor Actions */
                     <>
-                      <a
-                        href={selectedLoadDetail.employerPhone ? `tel:${selectedLoadDetail.employerPhone}` : "#"}
-                        className={`flex-1 py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg ${
-                          !selectedLoadDetail.employerPhone
-                            ? "bg-slate-800 text-slate-500 cursor-not-allowed opacity-50 shadow-none"
-                            : "bg-blue-600 text-white shadow-blue-600/30 hover:bg-blue-500"
-                        }`}
-                        onClick={e => !selectedLoadDetail.employerPhone && e.preventDefault()}
-                      >
-                        📞 ARA
-                      </a>
-                      <a
-                        href={selectedLoadDetail.employerPhone ? `https://wa.me/${selectedLoadDetail.employerPhone.replace(/\D/g,'')}?text=Merhaba, ${selectedLoadDetail.from} - ${selectedLoadDetail.to} ilanı için yazıyorum.` : "#"}
-                        className={`flex-1 py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg ${
-                          !selectedLoadDetail.employerPhone
-                            ? "bg-slate-800 text-slate-500 cursor-not-allowed opacity-50 shadow-none"
-                            : "bg-emerald-500 text-white shadow-emerald-500/30 hover:bg-emerald-400"
-                        }`}
-                        onClick={e => !selectedLoadDetail.employerPhone && e.preventDefault()}
-                      >
-                        💬 WHATSAPP
-                      </a>
+                      <div className="flex-1 space-y-2">
+                        <div className="flex gap-3">
+                          <a
+                            href={!userSettings.hidePhoneOnCards && selectedLoadDetail.employerPhone ? `tel:${selectedLoadDetail.employerPhone}` : "#"}
+                            className={`flex-1 py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg ${
+                              userSettings.hidePhoneOnCards || !selectedLoadDetail.employerPhone
+                                ? "bg-slate-800 text-slate-500 cursor-not-allowed opacity-50 shadow-none"
+                                : "bg-blue-600 text-white shadow-blue-600/30 hover:bg-blue-500"
+                            }`}
+                            onClick={e => (userSettings.hidePhoneOnCards || !selectedLoadDetail.employerPhone) && e.preventDefault()}
+                          >
+                            📞 ARA
+                          </a>
+                          <a
+                            href={!userSettings.hidePhoneOnCards && selectedLoadDetail.employerPhone ? `https://wa.me/${selectedLoadDetail.employerPhone.replace(/\D/g,'')}?text=Merhaba, ${selectedLoadDetail.from} - ${selectedLoadDetail.to} ilanı için yazıyorum.` : "#"}
+                            className={`flex-1 py-4 rounded-2xl font-black text-lg flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg ${
+                              userSettings.hidePhoneOnCards || !selectedLoadDetail.employerPhone
+                                ? "bg-slate-800 text-slate-500 cursor-not-allowed opacity-50 shadow-none"
+                                : "bg-emerald-500 text-white shadow-emerald-500/30 hover:bg-emerald-400"
+                            }`}
+                            onClick={e => (userSettings.hidePhoneOnCards || !selectedLoadDetail.employerPhone) && e.preventDefault()}
+                          >
+                            💬 WHATSAPP
+                          </a>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleReportLoad}
+                          disabled={isReportingLoad}
+                          className={`w-full py-2.5 rounded-xl text-xs font-black border transition-all ${
+                            isReportingLoad
+                              ? "bg-slate-700 text-slate-300 border-slate-600 cursor-not-allowed"
+                              : "bg-red-500/10 text-red-300 border-red-500/35 hover:bg-red-500/20"
+                          }`}
+                        >
+                          {isReportingLoad ? "RAPOR GÖNDERİLİYOR..." : "🚨 İLANI RAPORLA"}
+                        </button>
+                      </div>
                     </>
                   )}
                 </div>
@@ -3150,12 +3471,58 @@ export default function App() {
             </div>
           )}
 
+          {screen === "legal" && (
+            <div className="p-5 pb-20 space-y-4">
+              <h2 className="text-white text-3xl font-black tracking-tight">⚖️ Hukuki Sayfalar</h2>
+              <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <p className="text-white font-bold">KVKK / Gizlilik Politikası</p>
+                <p className="text-slate-300 text-sm mt-1">Kimlik, iletişim, ilan ve teklif verileri yalnızca hizmet sunumu amacıyla işlenir.</p>
+                <p className="text-slate-400 text-xs mt-1">Erişim/düzeltme/silme talepleri için: support@yukcep.app</p>
+              </div>
+              <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <p className="text-white font-bold">Kullanım Şartları</p>
+                <p className="text-slate-300 text-sm mt-1">Platform pazaryeridir. Taşıma sözleşmesi işveren ve taşıyıcı taraflar arasındadır.</p>
+                <p className="text-slate-400 text-xs mt-1">Yanıltıcı ilan, spam teklif ve kötüye kullanım hesap kısıtına yol açabilir.</p>
+              </div>
+              <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <p className="text-white font-bold">Çerez Politikası</p>
+                <p className="text-slate-300 text-sm mt-1">Zorunlu çerezler oturum için, analitik çerezler performans iyileştirmesi için kullanılır.</p>
+                <p className="text-slate-400 text-xs mt-1">Tarayıcı ayarlarından çerez tercihlerini yönetebilirsin.</p>
+              </div>
+            </div>
+          )}
+
+          {screen === "support" && (
+            <div className="p-5 pb-20 space-y-4">
+              <h2 className="text-white text-3xl font-black tracking-tight">🛟 Yardım Merkezi</h2>
+              <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <p className="text-white font-bold">Sık Sorulan Sorular</p>
+                <p className="text-slate-300 text-sm mt-1">Rol değişimi, teklif süreci, ilan yönetimi, görünürlük ve bildirim adımlarını kapsar.</p>
+                <div className="mt-2 space-y-1 text-xs text-slate-400">
+                  <p>• İşveren: İlan ver → teklifleri yönet → kabul/red</p>
+                  <p>• Sürücü: İş ara → teklif gönder → Benim Yapacak İşlerim</p>
+                </div>
+              </div>
+              <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <p className="text-white font-bold">İletişim</p>
+                <p className="text-slate-300 text-sm mt-1">support@yukcep.app · Hafta içi 09:00-18:00</p>
+                <p className="text-slate-400 text-xs mt-1">P1 olaylar için hedef ilk yanıt: 15 dakika.</p>
+              </div>
+              <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
+                <p className="text-white font-bold">Acil Durum / Güvenlik Bildirimi</p>
+                <p className="text-slate-300 text-sm mt-1">Şüpheli ilan veya kötüye kullanım durumunu “İlanı Raporla” ile iletebilirsin.</p>
+              </div>
+            </div>
+          )}
+
           {/* ─── AUTH SCREEN ─── */}
           {screen === "auth" && (
-            <AuthScreen
-              onBack={() => nav("welcome")}
-              onAuthSuccess={handleAuthSuccess}
-            />
+            <Suspense fallback={<div className="p-6 text-slate-300 text-sm">Kimlik doğrulama ekranı yükleniyor...</div>}>
+              <AuthScreen
+                onBack={() => nav("welcome")}
+                onAuthSuccess={handleAuthSuccess}
+              />
+            </Suspense>
           )}
 
           {/* ─── EMPLOYER ─── */}
@@ -3364,20 +3731,100 @@ export default function App() {
                     )}
                   </div>
                 )}
-                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50">
+                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50 space-y-3">
                   <p className="text-white text-sm font-bold">Bildirim Tercihleri</p>
-                  <p className="text-slate-400 text-xs mt-1">İlan, teklif ve mesaj bildirimlerini özelleştirme</p>
-                  <span className="inline-block mt-2 text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/25">Yakında</span>
+                  <button
+                    type="button"
+                    onClick={() => updateUserSetting("notificationsEnabled", !userSettings.notificationsEnabled)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs font-bold ${
+                      userSettings.notificationsEnabled
+                        ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                        : "bg-slate-900 border-slate-700 text-slate-300"
+                    }`}
+                  >
+                    <span>Anlık bildirim toast'ı</span>
+                    <span>{userSettings.notificationsEnabled ? "Açık" : "Kapalı"}</span>
+                  </button>
                 </div>
-                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50">
-                  <p className="text-white text-sm font-bold">Görünüm</p>
-                  <p className="text-slate-400 text-xs mt-1">Tema, kart yoğunluğu ve yazı boyutu seçenekleri</p>
-                  <span className="inline-block mt-2 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">Hazırlandı</span>
+                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50 space-y-3">
+                  <p className="text-white text-sm font-bold">Dil</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => updateUserSetting("language", "tr")}
+                      className={`py-2 rounded-lg text-xs font-black border ${userSettings.language === "tr" ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900 text-slate-300 border-slate-700"}`}
+                    >
+                      Türkçe
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateUserSetting("language", "en")}
+                      className={`py-2 rounded-lg text-xs font-black border ${userSettings.language === "en" ? "bg-blue-500/20 text-blue-300 border-blue-500/40" : "bg-slate-900 text-slate-300 border-slate-700"}`}
+                    >
+                      English
+                    </button>
+                  </div>
                 </div>
-                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50">
+                <div className="p-3 rounded-xl bg-slate-800/70 border border-slate-700/50 space-y-3">
                   <p className="text-white text-sm font-bold">Gizlilik ve Güvenlik</p>
-                  <p className="text-slate-400 text-xs mt-1">Oturum, cihaz ve veri paylaşımı tercihleri</p>
-                  <span className="inline-block mt-2 text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/25">Planlandı</span>
+                  <button
+                    type="button"
+                    onClick={() => updateUserSetting("hidePhoneOnCards", !userSettings.hidePhoneOnCards)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs font-bold ${
+                      userSettings.hidePhoneOnCards
+                        ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                        : "bg-slate-900 border-slate-700 text-slate-300"
+                    }`}
+                  >
+                    <span>Telefonu kartlarda gizle</span>
+                    <span>{userSettings.hidePhoneOnCards ? "Açık" : "Kapalı"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateUserSetting("requireEmailVerified", !userSettings.requireEmailVerified)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs font-bold ${
+                      userSettings.requireEmailVerified
+                        ? "bg-purple-500/15 border-purple-500/40 text-purple-300"
+                        : "bg-slate-900 border-slate-700 text-slate-300"
+                    }`}
+                  >
+                    <span>İşlem öncesi e-posta doğrulaması iste</span>
+                    <span>{userSettings.requireEmailVerified ? "Açık" : "Kapalı"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateUserSetting("requirePhoneOnActions", !userSettings.requirePhoneOnActions)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg border text-xs font-bold ${
+                      userSettings.requirePhoneOnActions
+                        ? "bg-cyan-500/15 border-cyan-500/40 text-cyan-300"
+                        : "bg-slate-900 border-slate-700 text-slate-300"
+                    }`}
+                  >
+                    <span>İşlem öncesi telefon doğrulaması iste</span>
+                    <span>{userSettings.requirePhoneOnActions ? "Açık" : "Kapalı"}</span>
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSettingsPanel(false);
+                      nav("legal");
+                    }}
+                    className="py-2.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-bold"
+                  >
+                    Hukuki Sayfalar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSettingsPanel(false);
+                      nav("support");
+                    }}
+                    className="py-2.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-bold"
+                  >
+                    Yardım Merkezi
+                  </button>
                 </div>
                 <button
                   type="button"

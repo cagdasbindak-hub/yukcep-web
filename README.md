@@ -27,6 +27,10 @@ The app fails fast on startup if these variables are missing.
 - `npm run build` - production build
 - `npm run lint` - eslint
 - `npm run preview` - preview production build
+- `npm run health:check` - HTTP health probe for target URL
+- `npm run smoke` - Playwright smoke check
+- `npm run a11y:smoke` - accessibility smoke check
+- `npm run e2e:live` - full live employer/driver E2E flow
 
 ## Database
 
@@ -40,6 +44,16 @@ The canonical schema is in [`schema.sql`](./schema.sql) and includes:
 - Row-Level Security (RLS) policies matching frontend behavior
 
 Apply the schema in your Supabase SQL editor before using authenticated flows.
+
+## Launch Ops
+
+- CI workflows: `.github/workflows/`
+- Rollback runbook: [`docs/ROLLBACK_RUNBOOK.md`](./docs/ROLLBACK_RUNBOOK.md)
+- Security checklist: [`docs/SECURITY_CHECKLIST.md`](./docs/SECURITY_CHECKLIST.md)
+- Error tracking: [`docs/ERROR_TRACKING.md`](./docs/ERROR_TRACKING.md)
+- Analytics plan: [`docs/ANALYTICS_PLAN.md`](./docs/ANALYTICS_PLAN.md)
+- Funnel query model: [`sql/funnel_dashboard.sql`](./sql/funnel_dashboard.sql)
+- SLO/KPI targets: [`docs/LAUNCH_SLO_KPI.md`](./docs/LAUNCH_SLO_KPI.md)
 
 ## Notes
 
