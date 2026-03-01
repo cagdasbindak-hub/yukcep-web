@@ -68,7 +68,31 @@ const empReviews = {
 };
 const getER = name => empReviews[name] || empReviews["default"];
 
+const getRoleSwitchPopupContent = (role) => {
+  if (role === "employer") {
+    return {
+      title: "🏢 İşveren Modu Aktif",
+      summary: "Artık yük ilanı yayınlama ve teklif değerlendirme akışı önceliklidir.",
+      points: [
+        "Ana akışta İşveren Feed ve Yeni İlan Ver aksiyonları görünür.",
+        "Yüklere gelen teklifleri kabul/red ederek süreci yönetirsin.",
+      ],
+      action: "Anladım, İşveren modunda devam et",
+    };
+  }
+  return {
+    title: "🚛 İş Arıyorum Modu Aktif",
+    summary: "Artık yük arama, teklif gönderme ve benim işlerim takibi önceliklidir.",
+    points: [
+      "Ana akışta Benim Yapacak İşlerim ve Yeni İş Ara aksiyonları görünür.",
+      "Verdiğin tekliflerin durumunu ve kabul edilen işleri feed'den izlersin.",
+    ],
+    action: "Anladım, İş Arıyorum modunda devam et",
+  };
+};
+
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Ana sayfada sürücü için Benim Yapacak İşlerim + Yeni İş Ara aksiyonu eklendi; rol değişimlerinde açıklama popupı getirildi." },
   { date: "2026-03-01", title: "Oturum açılışında profil rolü timeout’a dayanıklı hale getirildi; rol çözülemezse ana sayfada rol seçimi ile bloktan çıkış sağlandı." },
   { date: "2026-03-01", title: "Yük listesi sorgusu tekilleştirildi; REST fallback başarılı olduğunda çift WARN/INFO log tekrarları azaltıldı." },
   { date: "2026-03-01", title: "Canlı sayaçlarda public stats sorgusu tekilleştirildi; fallback başarılıysa gereksiz timeout WARN logları azaltıldı." },
@@ -369,6 +393,7 @@ export default function App() {
   const [runtimeLogs, setRuntimeLogs] = useState([]);
   const [showRuntimeLogs, setShowRuntimeLogs] = useState(false);
   const [releaseUpdates, setReleaseUpdates] = useState(RELEASE_UPDATES_SEED);
+  const [roleSwitchPopup, setRoleSwitchPopup] = useState(null);
   const remoteLogQueueRef = useRef([]);
   const remoteLogTimerRef = useRef(null);
   const remoteLogFlushRef = useRef(null);
@@ -1242,6 +1267,7 @@ export default function App() {
       setShowProfileCard(false);
       setShowSettingsPanel(false);
       setScreen("welcome");
+      setRoleSwitchPopup(getRoleSwitchPopupContent(normalizedRole));
       appendRuntimeLog("info", "ROLE_SWITCH_OK", `role=${normalizedRole}`);
       showToast(normalizedRole === "employer" ? "🏢 İşveren rolüne geçildi." : "🚛 İş Arıyorum rolüne geçildi.");
     } catch (error) {
@@ -2127,7 +2153,7 @@ export default function App() {
                               <span className="bg-slate-800 p-1.5 rounded-lg group-hover:bg-slate-700 transition-colors">
                                 {activeRole === "employer" ? "📋" : activeRole === "driver" ? "🧭" : "⏳"}
                               </span>
-                              {activeRole === "employer" ? "İşveren Feed" : activeRole === "driver" ? "İş Arıyorum Feed" : "Feed Hazırlanıyor"}
+                              {activeRole === "employer" ? "İşveren Feed" : activeRole === "driver" ? "Benim Yapacak İşlerim" : "Feed Hazırlanıyor"}
                             </button>
                             <button
                               onClick={() => {
@@ -2218,21 +2244,34 @@ export default function App() {
                     </button>
                   )}
                   {user && (
-                    <button
-                      onClick={openRoleFeed}
-                      disabled={!activeRole}
-                      className={`w-full py-3 px-4 rounded-2xl border text-sm font-black transition-all ${
-                        activeRole
-                          ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-200 active:scale-[0.98]"
-                          : "border-slate-600/40 bg-slate-800/60 text-slate-400 cursor-wait"
-                      }`}
-                    >
-                      {activeRole === "employer"
-                        ? "📋 İşveren Feed'e Git"
-                        : activeRole === "driver"
-                          ? "🧭 İş Arıyorum Feed'e Git"
-                          : "⏳ Profil Rolü Yükleniyor"}
-                    </button>
+                    activeRole === "driver" ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          onClick={openRoleFeed}
+                          className="py-3 px-3 rounded-2xl border text-sm font-black transition-all border-cyan-500/30 bg-cyan-500/10 text-cyan-200 active:scale-[0.98]"
+                        >
+                          🧭 Benim Yapacak İşlerim
+                        </button>
+                        <button
+                          onClick={() => nav("location")}
+                          className="py-3 px-3 rounded-2xl border text-sm font-black transition-all border-blue-500/30 bg-blue-500/10 text-blue-200 active:scale-[0.98]"
+                        >
+                          🔎 Yeni İş Ara
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={openRoleFeed}
+                        disabled={!activeRole}
+                        className={`w-full py-3 px-4 rounded-2xl border text-sm font-black transition-all ${
+                          activeRole
+                            ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-200 active:scale-[0.98]"
+                            : "border-slate-600/40 bg-slate-800/60 text-slate-400 cursor-wait"
+                        }`}
+                      >
+                        {activeRole === "employer" ? "📋 İşveren Feed'e Git" : "⏳ Profil Rolü Yükleniyor"}
+                      </button>
+                    )
                   )}
                 </div>
 
@@ -3283,6 +3322,9 @@ export default function App() {
                     <p className="text-slate-400 text-xs mt-1">
                       Ana sayfada yalnızca seçtiğin role ait akış görünür.
                     </p>
+                    <p className="text-cyan-300 text-[11px] mt-1.5 font-semibold">
+                      Aynı hesapta iki rolü de kullanabilirsin; buradan istediğin zaman geçiş yapabilirsin.
+                    </p>
                     <div className="grid grid-cols-2 gap-2 mt-3">
                       <button
                         type="button"
@@ -3335,6 +3377,37 @@ export default function App() {
                   className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm transition-all active:scale-95"
                 >
                   Kapat
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {roleSwitchPopup && (
+          <div
+            className="absolute inset-0 z-[93] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setRoleSwitchPopup(null)}
+          >
+            <div
+              className="w-full max-w-sm rounded-3xl border border-cyan-500/30 bg-slate-900/95 shadow-2xl overflow-hidden animate-in zoom-in-95 fade-in duration-200"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-5 py-4 border-b border-slate-700/50 bg-gradient-to-r from-cyan-600/15 to-blue-500/15">
+                <p className="text-white text-lg font-black tracking-tight">{roleSwitchPopup.title}</p>
+                <p className="text-slate-300 text-xs mt-1">{roleSwitchPopup.summary}</p>
+              </div>
+              <div className="p-4 space-y-2">
+                {roleSwitchPopup.points?.map((point, idx) => (
+                  <div key={`role-point-${idx}`} className="p-2.5 rounded-xl bg-slate-800/70 border border-slate-700/60">
+                    <p className="text-slate-200 text-xs font-semibold leading-relaxed">{point}</p>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setRoleSwitchPopup(null)}
+                  className="w-full mt-2 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm transition-all active:scale-95"
+                >
+                  {roleSwitchPopup.action || "Anladım"}
                 </button>
               </div>
             </div>

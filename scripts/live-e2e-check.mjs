@@ -21,6 +21,8 @@ const bidPrice = "30500";
 const driverPhone = `0555${seed.slice(-7)}`;
 const employerPhone = `0533${seed.slice(-7)}`;
 const password = `YukCep!${seed.slice(-6)}Aa`;
+const driverFeedActionPattern = /İş Arıyorum Feed'e Git|Benim Yapacak İşlerim/i;
+const employerFeedActionPattern = /İşveren Feed'e Git/i;
 
 const employer = {
   fullName: `E2E Isveren ${seed.slice(-6)}`,
@@ -69,7 +71,7 @@ const waitForWelcomeReady = async (page, options = {}) => {
     const hasPrimary =
       (await isVisible(page.getByRole("button", { name: /^İŞ ARIYORUM$/i }))) ||
       (await isVisible(page.getByRole("button", { name: /^İŞVERENİM$/i }))) ||
-      (await isVisible(page.getByRole("button", { name: /Feed'e Git/i }))) ||
+      (await isVisible(page.getByRole("button", { name: /Feed'e Git|Benim Yapacak İşlerim/i }))) ||
       (await isVisible(page.getByRole("button", { name: /Profil Rolü Yükleniyor/i }))) ||
       (await isVisible(page.getByRole("button", { name: /Giriş Yap/i })));
     if (hasPrimary) return;
@@ -114,17 +116,17 @@ const authViaSignup = async (page, user) => {
     const welcomeReady =
       (await isVisible(page.getByRole("button", { name: /^İŞ ARIYORUM$/i }))) ||
       (await isVisible(page.getByRole("button", { name: /^İŞVERENİM$/i }))) ||
-      (await isVisible(page.getByRole("button", { name: /Feed'e Git/i }))) ||
+      (await isVisible(page.getByRole("button", { name: /Feed'e Git|Benim Yapacak İşlerim/i }))) ||
       (await isVisible(page.getByRole("button", { name: /Profil Rolü Yükleniyor/i })));
     if (welcomeReady) {
       const roleDeadline = Date.now() + 15000;
       while (Date.now() < roleDeadline) {
         const employerFeedVisible = await page
-          .getByRole("button", { name: /İşveren Feed'e Git/i })
+          .getByRole("button", { name: employerFeedActionPattern })
           .isVisible()
           .catch(() => false);
         const driverFeedVisible = await page
-          .getByRole("button", { name: /İş Arıyorum Feed'e Git/i })
+          .getByRole("button", { name: driverFeedActionPattern })
           .isVisible()
           .catch(() => false);
 
@@ -149,7 +151,7 @@ const authViaSignup = async (page, user) => {
 
 const postLoadAsEmployer = async (page) => {
   await waitForWelcomeReady(page);
-  const employerFeedButton = page.getByRole("button", { name: /İşveren Feed'e Git/i });
+  const employerFeedButton = page.getByRole("button", { name: employerFeedActionPattern });
   await ensureVisible(employerFeedButton, 20000, "İşveren feed butonu bulunamadı.");
   await employerFeedButton.click();
   await ensureVisible(page.getByRole("heading", { name: /İşveren Feed/i }), 25000, "İşveren feed ekranı açılmadı.");
@@ -177,7 +179,7 @@ const postLoadAsEmployer = async (page) => {
 
 const ensureEmployerFeedHasLoadCard = async (page) => {
   await waitForWelcomeReady(page);
-  const employerFeedButton = page.getByRole("button", { name: /İşveren Feed'e Git/i });
+  const employerFeedButton = page.getByRole("button", { name: employerFeedActionPattern });
   await ensureVisible(employerFeedButton, 15000, "İşveren feed butonu görünmedi.");
   await employerFeedButton.click();
   await ensureVisible(page.getByRole("heading", { name: /İşveren Feed/i }), 30000, "İşveren feed ekranı açılmadı.");
@@ -188,7 +190,7 @@ const ensureEmployerFeedHasLoadCard = async (page) => {
 
 const openDriverLocationAndList = async (page) => {
   await waitForWelcomeReady(page);
-  const driverFeedButton = page.getByRole("button", { name: /İş Arıyorum Feed'e Git/i });
+  const driverFeedButton = page.getByRole("button", { name: driverFeedActionPattern });
   await ensureVisible(driverFeedButton, 20000, "İş arıyorum feed butonu bulunamadı.");
   await driverFeedButton.click();
   await ensureVisible(page.getByRole("heading", { name: /İş Arıyorum Feed/i }), 25000, "Şoför feed ekranı açılmadı.");
@@ -246,8 +248,8 @@ const assertHomeButtonsForRole = async (page, role) => {
   while (Date.now() < deadline) {
     const hasDriverBtn = await isVisible(page.getByRole("button", { name: /^İŞ ARIYORUM$/i }));
     const hasEmployerBtn = await isVisible(page.getByRole("button", { name: /^İŞVERENİM$/i }));
-    const hasDriverFeedBtn = await isVisible(page.getByRole("button", { name: /İş Arıyorum Feed'e Git/i }));
-    const hasEmployerFeedBtn = await isVisible(page.getByRole("button", { name: /İşveren Feed'e Git/i }));
+    const hasDriverFeedBtn = await isVisible(page.getByRole("button", { name: driverFeedActionPattern }));
+    const hasEmployerFeedBtn = await isVisible(page.getByRole("button", { name: employerFeedActionPattern }));
     const hasPendingRoleBtn = await isVisible(page.getByRole("button", { name: /Profil Rolü Yükleniyor/i }));
 
     lastState = {
@@ -344,7 +346,7 @@ const switchRoleInSettings = async (page, role) => {
 
 const openEmployerBidPanel = async (page) => {
   await waitForWelcomeReady(page);
-  const employerFeedButton = page.getByRole("button", { name: /İşveren Feed'e Git/i });
+  const employerFeedButton = page.getByRole("button", { name: employerFeedActionPattern });
   const hasEmployerFeedButton = await employerFeedButton.isVisible().catch(() => false);
 
   if (hasEmployerFeedButton) {
@@ -396,7 +398,7 @@ const acceptBidOnEmployerPanel = async (page) => {
 
 const verifyDriverFeedAccepted = async (page) => {
   await waitForWelcomeReady(page);
-  await page.getByRole("button", { name: /İş Arıyorum Feed'e Git/i }).click();
+  await page.getByRole("button", { name: driverFeedActionPattern }).click();
   await ensureVisible(page.getByRole("heading", { name: /İş Arıyorum Feed/i }), 30000, "Şoför feed ekranı açılmadı.");
   await page.getByRole("button", { name: /^Yenile$/i }).click();
 
@@ -415,7 +417,7 @@ const verifyDriverFeedAccepted = async (page) => {
 
 const verifyDriverFeedPending = async (page) => {
   await waitForWelcomeReady(page);
-  await page.getByRole("button", { name: /İş Arıyorum Feed'e Git/i }).click();
+  await page.getByRole("button", { name: driverFeedActionPattern }).click();
   await ensureVisible(page.getByRole("heading", { name: /İş Arıyorum Feed/i }), 30000, "Şoför feed ekranı açılmadı.");
   await page.getByRole("button", { name: /^Yenile$/i }).click();
 
@@ -429,7 +431,7 @@ const verifyDriverFeedPending = async (page) => {
 
 const verifyEmployerFeedAssignedAndNoTimeout = async (page) => {
   await waitForWelcomeReady(page);
-  const employerFeedButton = page.getByRole("button", { name: /İşveren Feed'e Git/i });
+  const employerFeedButton = page.getByRole("button", { name: employerFeedActionPattern });
   const hasEmployerFeedButton = await employerFeedButton.isVisible().catch(() => false);
 
   if (!hasEmployerFeedButton) throw new Error("İşveren feed butonu bulunamadı.");
