@@ -96,6 +96,7 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Feedback listesinde teknik DB hata metinleri gizlendi; tablo eksikse kullanıcıya güvenli fallback mesajı gösteriliyor." },
   { date: "2026-03-01", title: "Feedback gönderiminde schema cache/table missing hatası için yerel + runtime çift fallback sertleştirildi; kritik hata yerine güvenli kayıt akışı aktif." },
   { date: "2026-03-01", title: "Son 10 Güncelleme üstüne herkese açık Feedback Panosu eklendi: kullanıcı önerisi + otomatik Codex yorumu + durum tag." },
   { date: "2026-03-01", title: "Feedback moderasyonu otomatikleştirildi; geri bildirim dışı yorumlar filtrelenip Kötü Fikir etiketiyle işaretleniyor." },
@@ -1777,7 +1778,10 @@ export default function App() {
       }
 
       appendRuntimeLog("error", "FEEDBACK_CREATE_FAIL", message);
-      setFeedbackError(message);
+      const feedbackCreateUiError = /timeout|zaman aşım/i.test(String(message || ""))
+        ? "Feedback gönderimi gecikti. Lütfen tekrar dene."
+        : "Feedback gönderilemedi. Lütfen tekrar dene.";
+      setFeedbackError(feedbackCreateUiError);
       showToast("Feedback gönderilemedi.", "error");
       pushPersistentError("FEEDBACK", message);
     } finally {
@@ -2150,14 +2154,19 @@ export default function App() {
             if (fallbackRows.length > 0) {
               persistFeedbackItems(fallbackRows);
             }
-            setFeedbackError("Feedback tablosu henüz açılmadı. Geçici log fallback gösteriliyor.");
+            setFeedbackError("Feedback panosu hazırlanıyor. Geçici kayıtlar gösteriliyor.");
             return fallbackRows;
           } catch (fallbackError) {
             appendRuntimeLog("warn", "FEEDBACK_FALLBACK_FAIL", fallbackError?.message || "Feedback fallback failed");
+            setFeedbackError("Feedback panosu hazırlanıyor. Geçici kayıtlar gösterilecek.");
+            return null;
           }
         }
 
-        setFeedbackError(message || "Feedback listesi yüklenemedi.");
+        const feedbackFetchUiError = /timeout|zaman aşım/i.test(String(message || ""))
+          ? "Feedback listesi geç yanıt verdi. Birkaç saniye sonra tekrar dene."
+          : "Feedback listesi şu an yüklenemedi. Lütfen tekrar dene.";
+        setFeedbackError(feedbackFetchUiError);
         return null;
       } finally {
         setIsFeedbackLoading(false);
