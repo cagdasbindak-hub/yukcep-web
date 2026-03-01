@@ -2024,10 +2024,14 @@ export default function App() {
             >
               <ArrowLeft size={24} />
             </button>
-            <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => nav("welcome")}
+              className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-white/10 transition-all text-left"
+            >
               <span className="text-blue-500 transform -scale-x-100"><Truck size={22} className="fill-current" /></span>
               <span className="text-white font-extrabold text-lg tracking-tight">YükCep</span>
-            </div>
+            </button>
             <div className="w-10" />
           </div>
         )}
@@ -2041,12 +2045,16 @@ export default function App() {
             <div className="flex flex-col min-h-full">
               {/* ─── COMPACT TOP NAV BAR ─── */}
               <div className="topbar-grad relative z-40 flex items-center justify-between px-5 py-4 backdrop-blur-sm border-b border-slate-700/50">
-                <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => nav("welcome")}
+                  className="flex items-center gap-2.5 px-1.5 py-1 rounded-xl hover:bg-white/10 transition-all"
+                >
                   <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}>
                     <span className="text-2xl">🚚</span>
                   </div>
                   <span className="text-white font-black text-xl tracking-tight">YükCep</span>
-                </div>
+                </button>
                 <div className="flex items-center gap-2">
                   <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-green-500/10 border border-green-500/20">
                     <span className="relative flex h-2 w-2"><span className="animate-ping absolute h-full w-full rounded-full bg-green-400 opacity-75" /><span className="relative h-2 w-2 rounded-full bg-green-500" /></span>
