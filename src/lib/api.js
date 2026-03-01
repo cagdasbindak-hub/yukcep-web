@@ -361,6 +361,91 @@ export const updateLoadStatusApi = async ({ loadId, status }) => {
   return unwrap(res, "Failed to update load status");
 };
 
+const patchViaRestApi = async ({ table, key, value, payload, accessToken, timeoutMs }) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/${table}?${encodeURIComponent(key)}=eq.${encodeURIComponent(value)}`,
+      {
+        method: "PATCH",
+        signal: controller.signal,
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    const text = await res.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+
+    if (!res.ok) {
+      const message =
+        (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
+        text ||
+        `HTTP ${res.status}`;
+      throw new Error(message);
+    }
+
+    if (Array.isArray(parsed)) return parsed[0] || null;
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Request timeout after ${timeoutMs / 1000}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+export const updateBidStatusViaRestApi = async ({ bidId, status, accessToken, timeoutMs = 12000 }) => {
+  const payload = {
+    status,
+    updated_at: new Date().toISOString(),
+  };
+  try {
+    return await patchViaRestApi({
+      table: "bids",
+      key: "id",
+      value: bidId,
+      payload,
+      accessToken,
+      timeoutMs,
+    });
+  } catch (error) {
+    const message = String(error?.message || "").toLowerCase();
+    if (!message.includes("updated_at")) throw error;
+    return patchViaRestApi({
+      table: "bids",
+      key: "id",
+      value: bidId,
+      payload: { status },
+      accessToken,
+      timeoutMs,
+    });
+  }
+};
+
+export const updateLoadStatusViaRestApi = async ({ loadId, status, accessToken, timeoutMs = 12000 }) =>
+  patchViaRestApi({
+    table: "loads",
+    key: "id",
+    value: loadId,
+    payload: { status },
+    accessToken,
+    timeoutMs,
+  });
+
 export const createNotificationApi = async ({ userId, actorId, message }) => {
   const res = await supabase
     .from("notifications")
@@ -849,6 +934,89 @@ export const fetchDriverFeedApi = async ({ userId }) => {
   });
 };
 
+export const fetchDriverFeedViaRestApi = async ({ userId, accessToken, timeoutMs = 12000 }) => {
+  const headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+  };
+
+  let bidRows = [];
+  try {
+    bidRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/bids?select=id,load_id,driver_id,price,status,created_at,updated_at&driver_id=eq.${encodeURIComponent(
+        userId
+      )}&order=created_at.desc`,
+      headers,
+      timeoutMs,
+    });
+  } catch (error) {
+    const message = String(error?.message || "").toLowerCase();
+    if (!message.includes("updated_at")) throw error;
+    bidRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/bids?select=id,load_id,driver_id,price,status,created_at&driver_id=eq.${encodeURIComponent(
+        userId
+      )}&order=created_at.desc`,
+      headers,
+      timeoutMs,
+    });
+  }
+  const bids = mapBidsWithOptionalUpdatedAt(Array.isArray(bidRows) ? bidRows : []);
+  if (!bids.length) return [];
+
+  const loadIds = [...new Set(bids.map((row) => row.load_id).filter(Boolean))];
+  if (!loadIds.length) return [];
+
+  const loadsRows = await fetchJsonWithTimeout({
+    url: `${SUPABASE_URL}/rest/v1/loads?select=id,employer_id,origin_city,destination_city,pickup_date,load_type,trailer_type,price,currency,status,created_at&id=in.(${loadIds.join(
+      ","
+    )})`,
+    headers,
+    timeoutMs,
+  });
+  const loads = Array.isArray(loadsRows) ? loadsRows : [];
+  const loadMap = new Map(loads.map((row) => [row.id, row]));
+
+  const employerIds = [...new Set(loads.map((row) => row.employer_id).filter(Boolean))];
+  let profileMap = new Map();
+  if (employerIds.length) {
+    const profileRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/profiles?select=id,full_name,phone,avatar_url,role&id=in.(${employerIds.join(",")})`,
+      headers,
+      timeoutMs,
+    });
+    if (Array.isArray(profileRows)) {
+      profileMap = buildProfileMap(profileRows);
+    }
+  }
+
+  return bids.map((bid) => {
+    const load = loadMap.get(bid.load_id) || {};
+    const employer = profileMap.get(load.employer_id) || null;
+    return {
+      bid_id: bid.id,
+      bid_status: bid.status,
+      bid_price: bid.price,
+      bid_created_at: bid.created_at,
+      bid_updated_at: bid.updated_at || bid.created_at || null,
+      load_id: bid.load_id,
+      origin_city: load.origin_city || "-",
+      destination_city: load.destination_city || "-",
+      pickup_date: load.pickup_date || null,
+      load_type: load.load_type || "-",
+      trailer_type: load.trailer_type || "-",
+      load_price: load.price || 0,
+      currency: load.currency || "TRY",
+      load_status: load.status || "open",
+      employer_id: load.employer_id || null,
+      employer_name: employer?.full_name || "İşveren",
+      employer_phone: employer?.phone || null,
+      employer_avatar: employer?.avatar_url || null,
+      employer_role: employer?.role || "employer",
+      load_created_at: load.created_at || null,
+    };
+  });
+};
+
 export const fetchEmployerFeedApi = async ({ userId }) => {
   const loadsRes = await supabase
     .from("loads")
@@ -899,6 +1067,10 @@ export const fetchEmployerFeedApi = async ({ userId }) => {
     const loadBids = (bidsByLoad[load.id] || []).sort(
       (a, b) => new Date(b.bid_created_at).getTime() - new Date(a.bid_created_at).getTime()
     );
+    const acceptedCount = loadBids.filter((x) => x.bid_status === "ACCEPTED").length;
+    const rejectedCount = loadBids.filter((x) => x.bid_status === "REJECTED").length;
+    const pendingCount = loadBids.filter((x) => x.bid_status === "PENDING").length;
+    const derivedStatus = acceptedCount > 0 ? "assigned" : load.status || "open";
     return {
       load_id: load.id,
       origin_city: load.origin_city,
@@ -908,13 +1080,113 @@ export const fetchEmployerFeedApi = async ({ userId }) => {
       trailer_type: load.trailer_type,
       load_price: load.price,
       currency: load.currency || "TRY",
-      load_status: load.status || "open",
+      load_status: derivedStatus,
       load_created_at: load.created_at,
       bids: loadBids,
       bid_count: loadBids.length,
-      pending_count: loadBids.filter((x) => x.bid_status === "PENDING").length,
-      accepted_count: loadBids.filter((x) => x.bid_status === "ACCEPTED").length,
-      rejected_count: loadBids.filter((x) => x.bid_status === "REJECTED").length,
+      pending_count: pendingCount,
+      accepted_count: acceptedCount,
+      rejected_count: rejectedCount,
+    };
+  });
+};
+
+export const fetchEmployerFeedViaRestApi = async ({ userId, accessToken, timeoutMs = 12000 }) => {
+  const headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+  };
+
+  const loadsRows = await fetchJsonWithTimeout({
+    url: `${SUPABASE_URL}/rest/v1/loads?select=id,employer_id,origin_city,destination_city,pickup_date,load_type,trailer_type,price,currency,status,created_at&employer_id=eq.${encodeURIComponent(
+      userId
+    )}&order=created_at.desc`,
+    headers,
+    timeoutMs,
+  });
+  const loads = Array.isArray(loadsRows) ? loadsRows : [];
+  if (!loads.length) return [];
+
+  const loadIds = loads.map((row) => row.id).filter(Boolean);
+  if (!loadIds.length) return [];
+
+  let bidsRows = [];
+  try {
+    bidsRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/bids?select=id,load_id,driver_id,price,status,created_at,updated_at&load_id=in.(${loadIds.join(
+        ","
+      )})&order=created_at.desc`,
+      headers,
+      timeoutMs,
+    });
+  } catch (error) {
+    const message = String(error?.message || "").toLowerCase();
+    if (!message.includes("updated_at")) throw error;
+    bidsRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/bids?select=id,load_id,driver_id,price,status,created_at&load_id=in.(${loadIds.join(
+        ","
+      )})&order=created_at.desc`,
+      headers,
+      timeoutMs,
+    });
+  }
+
+  const bids = mapBidsWithOptionalUpdatedAt(Array.isArray(bidsRows) ? bidsRows : []);
+  const driverIds = [...new Set(bids.map((row) => row.driver_id).filter(Boolean))];
+  let driverMap = new Map();
+  if (driverIds.length) {
+    const driverRows = await fetchJsonWithTimeout({
+      url: `${SUPABASE_URL}/rest/v1/profiles?select=id,full_name,phone,avatar_url,role&id=in.(${driverIds.join(",")})`,
+      headers,
+      timeoutMs,
+    });
+    if (Array.isArray(driverRows)) {
+      driverMap = buildProfileMap(driverRows);
+    }
+  }
+
+  const bidsByLoad = bids.reduce((acc, bid) => {
+    if (!acc[bid.load_id]) acc[bid.load_id] = [];
+    const driver = driverMap.get(bid.driver_id) || null;
+    acc[bid.load_id].push({
+      bid_id: bid.id,
+      driver_id: bid.driver_id,
+      driver_name: driver?.full_name || "Şoför",
+      driver_phone: driver?.phone || null,
+      driver_avatar: driver?.avatar_url || null,
+      driver_role: driver?.role || "driver",
+      bid_status: bid.status,
+      bid_price: bid.price,
+      bid_created_at: bid.created_at,
+      bid_updated_at: bid.updated_at || bid.created_at || null,
+    });
+    return acc;
+  }, {});
+
+  return loads.map((load) => {
+    const loadBids = (bidsByLoad[load.id] || []).sort(
+      (a, b) => new Date(b.bid_created_at).getTime() - new Date(a.bid_created_at).getTime()
+    );
+    const acceptedCount = loadBids.filter((x) => x.bid_status === "ACCEPTED").length;
+    const rejectedCount = loadBids.filter((x) => x.bid_status === "REJECTED").length;
+    const pendingCount = loadBids.filter((x) => x.bid_status === "PENDING").length;
+    const derivedStatus = acceptedCount > 0 ? "assigned" : load.status || "open";
+    return {
+      load_id: load.id,
+      origin_city: load.origin_city,
+      destination_city: load.destination_city,
+      pickup_date: load.pickup_date,
+      load_type: load.load_type,
+      trailer_type: load.trailer_type,
+      load_price: load.price,
+      currency: load.currency || "TRY",
+      load_status: derivedStatus,
+      load_created_at: load.created_at,
+      bids: loadBids,
+      bid_count: loadBids.length,
+      pending_count: pendingCount,
+      accepted_count: acceptedCount,
+      rejected_count: rejectedCount,
     };
   });
 };

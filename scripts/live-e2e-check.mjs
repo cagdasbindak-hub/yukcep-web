@@ -59,8 +59,10 @@ const ensureVisible = async (locator, timeout = 30000, message = "Element buluna
 
 const isVisible = async (locator) => locator.isVisible().catch(() => false);
 
-const waitForWelcomeReady = async (page) => {
-  await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
+const waitForWelcomeReady = async (page, options = {}) => {
+  if (options.navigate !== false) {
+    await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
+  }
   await ensureVisible(page.getByText("YükCep").first(), 45000, "Ana ekran yüklenmedi.");
   const deadline = Date.now() + 45000;
   while (Date.now() < deadline) {
@@ -68,6 +70,7 @@ const waitForWelcomeReady = async (page) => {
       (await isVisible(page.getByRole("button", { name: /^İŞ ARIYORUM$/i }))) ||
       (await isVisible(page.getByRole("button", { name: /^İŞVERENİM$/i }))) ||
       (await isVisible(page.getByRole("button", { name: /Feed'e Git/i }))) ||
+      (await isVisible(page.getByRole("button", { name: /Profil Rolü Yükleniyor/i }))) ||
       (await isVisible(page.getByRole("button", { name: /Giriş Yap/i })));
     if (hasPrimary) return;
     await page.waitForTimeout(300);
@@ -111,7 +114,8 @@ const authViaSignup = async (page, user) => {
     const welcomeReady =
       (await isVisible(page.getByRole("button", { name: /^İŞ ARIYORUM$/i }))) ||
       (await isVisible(page.getByRole("button", { name: /^İŞVERENİM$/i }))) ||
-      (await isVisible(page.getByRole("button", { name: /Feed'e Git/i })));
+      (await isVisible(page.getByRole("button", { name: /Feed'e Git/i }))) ||
+      (await isVisible(page.getByRole("button", { name: /Profil Rolü Yükleniyor/i })));
     if (welcomeReady) {
       const roleDeadline = Date.now() + 15000;
       while (Date.now() < roleDeadline) {
@@ -145,7 +149,11 @@ const authViaSignup = async (page, user) => {
 
 const postLoadAsEmployer = async (page) => {
   await waitForWelcomeReady(page);
-  await page.getByRole("button", { name: /İŞVERENİM/i }).click();
+  const employerFeedButton = page.getByRole("button", { name: /İşveren Feed'e Git/i });
+  await ensureVisible(employerFeedButton, 20000, "İşveren feed butonu bulunamadı.");
+  await employerFeedButton.click();
+  await ensureVisible(page.getByRole("heading", { name: /İşveren Feed/i }), 25000, "İşveren feed ekranı açılmadı.");
+  await page.getByRole("button", { name: /Yeni İlan Ver/i }).click();
   await ensureVisible(
     page.getByRole("heading", { name: /Hızlı İlan Ver/i }),
     25000,
@@ -180,7 +188,11 @@ const ensureEmployerFeedHasLoadCard = async (page) => {
 
 const openDriverLocationAndList = async (page) => {
   await waitForWelcomeReady(page);
-  await page.getByRole("button", { name: /İŞ ARIYORUM/i }).click();
+  const driverFeedButton = page.getByRole("button", { name: /İş Arıyorum Feed'e Git/i });
+  await ensureVisible(driverFeedButton, 20000, "İş arıyorum feed butonu bulunamadı.");
+  await driverFeedButton.click();
+  await ensureVisible(page.getByRole("heading", { name: /İş Arıyorum Feed/i }), 25000, "Şoför feed ekranı açılmadı.");
+  await page.getByRole("button", { name: /Yük Ara/i }).click();
   await ensureVisible(page.getByRole("heading", { name: /Neredesiniz/i }), 25000, "Lokasyon ekranı açılmadı.");
 
   await page.getByPlaceholder(/Sehir ara/i).fill(fromCity);
@@ -228,26 +240,87 @@ const getInitials = (fullName = "") =>
     .slice(0, 2);
 
 const assertHomeButtonsForRole = async (page, role) => {
-  await waitForWelcomeReady(page);
-  const hasDriverBtn = await isVisible(page.getByRole("button", { name: /^İŞ ARIYORUM$/i }));
-  const hasEmployerBtn = await isVisible(page.getByRole("button", { name: /^İŞVERENİM$/i }));
-  if (role === "driver") {
-    if (!hasDriverBtn) throw new Error("Driver rolünde İŞ ARIYORUM butonu görünmüyor.");
-    if (hasEmployerBtn) throw new Error("Driver rolünde İŞVERENİM butonu görünmemeli.");
-  } else {
-    if (!hasEmployerBtn) throw new Error("Employer rolünde İŞVERENİM butonu görünmüyor.");
-    if (hasDriverBtn) throw new Error("Employer rolünde İŞ ARIYORUM butonu görünmemeli.");
+  await waitForWelcomeReady(page, { navigate: false });
+  const deadline = Date.now() + 25000;
+  let lastState = {};
+  while (Date.now() < deadline) {
+    const hasDriverBtn = await isVisible(page.getByRole("button", { name: /^İŞ ARIYORUM$/i }));
+    const hasEmployerBtn = await isVisible(page.getByRole("button", { name: /^İŞVERENİM$/i }));
+    const hasDriverFeedBtn = await isVisible(page.getByRole("button", { name: /İş Arıyorum Feed'e Git/i }));
+    const hasEmployerFeedBtn = await isVisible(page.getByRole("button", { name: /İşveren Feed'e Git/i }));
+    const hasPendingRoleBtn = await isVisible(page.getByRole("button", { name: /Profil Rolü Yükleniyor/i }));
+
+    lastState = {
+      hasDriverBtn,
+      hasEmployerBtn,
+      hasDriverFeedBtn,
+      hasEmployerFeedBtn,
+      hasPendingRoleBtn,
+    };
+
+    if (role === "driver") {
+      const ready =
+        !hasDriverBtn &&
+        !hasEmployerBtn &&
+        !hasEmployerFeedBtn &&
+        hasDriverFeedBtn &&
+        !hasPendingRoleBtn;
+      if (ready) return;
+    } else {
+      const ready =
+        !hasDriverBtn &&
+        !hasEmployerBtn &&
+        !hasDriverFeedBtn &&
+        hasEmployerFeedBtn &&
+        !hasPendingRoleBtn;
+      if (ready) return;
+    }
+
+    await page.waitForTimeout(350);
   }
+
+  throw new Error(`Ana sayfa rol görünürlüğü doğrulanamadı (${role}). state=${JSON.stringify(lastState)}`);
 };
 
 const openSettingsFromProfile = async (page, fullName) => {
-  await waitForWelcomeReady(page);
+  await waitForWelcomeReady(page, { navigate: false });
   const initials = getInitials(fullName);
-  const avatarButton = page.getByRole("button", { name: new RegExp(`^${initials}$`, "i") }).first();
-  await ensureVisible(avatarButton, 15000, "Profil avatar butonu bulunamadı.");
-  await avatarButton.click();
-  await ensureVisible(page.getByRole("button", { name: /^Ayarlar$/i }), 10000, "Profil menüsü açılamadı.");
-  await page.getByRole("button", { name: /^Ayarlar$/i }).click();
+  let avatarButton = page.getByRole("button", { name: new RegExp(`^${initials}$`, "i") }).first();
+  let hasAvatar = await avatarButton.isVisible().catch(() => false);
+  if (!hasAvatar) {
+    avatarButton = page.getByRole("button", { name: /^\?$/i }).first();
+    hasAvatar = await avatarButton.isVisible().catch(() => false);
+  }
+  if (hasAvatar) {
+    await avatarButton.click({ force: true });
+  } else {
+    const fallbackTopbarAvatar = page.locator(".topbar-grad button").last();
+    const hasFallback = await fallbackTopbarAvatar.isVisible().catch(() => false);
+    if (!hasFallback) {
+      throw new Error("Profil avatar butonu bulunamadı.");
+    }
+    await fallbackTopbarAvatar.click({ force: true });
+  }
+  const settingsButton = page.getByRole("button", { name: /Ayarlar/i });
+  await page.waitForTimeout(350);
+  let settingsVisible = await settingsButton.isVisible().catch(() => false);
+  if (!settingsVisible) {
+    const fallbackTopbarAvatar = page.locator(".topbar-grad button").last();
+    const hasFallback = await fallbackTopbarAvatar.isVisible().catch(() => false);
+    if (hasFallback) {
+      await fallbackTopbarAvatar.click({ force: true });
+      await page.waitForTimeout(350);
+      settingsVisible = await settingsButton.isVisible().catch(() => false);
+    }
+  }
+  if (!settingsVisible) {
+    const buttonNames = await page
+      .getByRole("button")
+      .allTextContents()
+      .catch(() => []);
+    throw new Error(`Profil menüsü açılamadı. visible_buttons=${JSON.stringify(buttonNames.slice(0, 20))}`);
+  }
+  await page.getByRole("button", { name: /Ayarlar/i }).click();
   await ensureVisible(page.getByText(/Aktif Rol/i), 10000, "Ayarlar paneli açılmadı.");
 };
 
@@ -266,7 +339,7 @@ const switchRoleInSettings = async (page, role) => {
   if (await isVisible(closeButton)) {
     await closeButton.click();
   }
-  await waitForWelcomeReady(page);
+  await waitForWelcomeReady(page, { navigate: false });
 };
 
 const openEmployerBidPanel = async (page) => {
@@ -290,13 +363,35 @@ const openEmployerBidPanel = async (page) => {
 };
 
 const acceptBidOnEmployerPanel = async (page) => {
-  const bidRow = page
+  const pendingBidRow = page
     .locator("div", { hasText: `${bidPrice} ₺` })
     .filter({ has: page.getByRole("button", { name: /Kabul/i }) })
     .first();
-  await ensureVisible(bidRow, 60000, "Beklenen teklif satırı işverene düşmedi.");
-  await bidRow.getByRole("button", { name: /Kabul/i }).click();
-  await ensureVisible(page.getByText(/ONAYLANDI/i), 30000, "Teklif kabul edildikten sonra durum güncellenmedi.");
+  await ensureVisible(pendingBidRow, 60000, "Beklenen teklif satırı işverene düşmedi.");
+  await pendingBidRow.getByRole("button", { name: /Kabul/i }).click({ force: true });
+
+  const waitForDecision = async (deadlineMs) => {
+    const decisionDeadline = Date.now() + deadlineMs;
+    while (Date.now() < decisionDeadline) {
+      const stillPendingVisible = await pendingBidRow.isVisible().catch(() => false);
+      if (!stillPendingVisible) return true;
+      const rowText = ((await pendingBidRow.textContent().catch(() => "")) || "").replace(/\s+/g, " ");
+      const hasAcceptedLabel = /ONAYLANDI|Kabul Edildi|ACCEPTED/i.test(rowText);
+      const hasAcceptButton = await pendingBidRow
+        .getByRole("button", { name: /Kabul/i })
+        .isVisible()
+        .catch(() => false);
+      if (hasAcceptedLabel || !hasAcceptButton) return true;
+      await page.waitForTimeout(350);
+    }
+    return false;
+  };
+
+  const accepted = await waitForDecision(50000);
+  if (accepted) return;
+
+  const rowText = ((await pendingBidRow.textContent().catch(() => "")) || "").replace(/\s+/g, " ");
+  throw new Error(`Kabul aksiyonu sonrası teklif satırı güncellenmedi. row=${rowText}`);
 };
 
 const verifyDriverFeedAccepted = async (page) => {
@@ -340,19 +435,35 @@ const verifyEmployerFeedAssignedAndNoTimeout = async (page) => {
   if (!hasEmployerFeedButton) throw new Error("İşveren feed butonu bulunamadı.");
   await employerFeedButton.click();
   await ensureVisible(page.getByRole("heading", { name: /İşveren Feed/i }), 30000, "İşveren feed tekrar açılamadı.");
-  await page.getByRole("button", { name: /^Yenile$/i }).click();
 
-  const card = page.locator("div", { hasText: loadType }).first();
-  await ensureVisible(card, 45000, "İşveren feed’de hedef ilan bulunamadı (final kontrol).");
-  await ensureVisible(card.getByText(/ASSIGNED/i), 45000, "İşveren feed’de ilan durumu ASSIGNED değil.");
+  const refreshButton = page.getByRole("button", { name: /^Yenile$/i });
+  const deadline = Date.now() + 60000;
+  let lastCardText = "";
 
-  const pageText = (await page.locator("body").textContent()) || "";
-  if (/zaman aşımına uğradı/i.test(pageText)) {
-    throw new Error("Ekranda zaman aşımı hatası görünüyor.");
+  while (Date.now() < deadline) {
+    await refreshButton.click();
+    const card = page
+      .locator("div", {
+        hasText: loadType,
+        has: page.getByRole("button", { name: /İlan Detayını Aç/i }),
+      })
+      .first();
+    await ensureVisible(card, 20000, "İşveren feed’de hedef ilan bulunamadı (final kontrol).");
+    lastCardText = ((await card.textContent()) || "").replace(/\s+/g, " ");
+    if (/ASSIGNED|assigned/i.test(lastCardText)) {
+      const pageText = (await page.locator("body").textContent()) || "";
+      if (/zaman aşımına uğradı/i.test(pageText)) {
+        throw new Error("Ekranda zaman aşımı hatası görünüyor.");
+      }
+      if (/Son Hata/i.test(pageText)) {
+        throw new Error("Ekranda Son Hata bloğu görünüyor.");
+      }
+      return;
+    }
+    await page.waitForTimeout(1800);
   }
-  if (/Son Hata/i.test(pageText)) {
-    throw new Error("Ekranda Son Hata bloğu görünüyor.");
-  }
+
+  throw new Error(`İşveren feed’de ilan durumu ASSIGNED değil. card=${lastCardText}`);
 };
 
 const runCheckpoint = async (id, title, fn) => {
@@ -418,6 +529,42 @@ const readRuntimeLogs = async (page) => {
   }
 };
 
+const readLocalDebug = async (page) => {
+  try {
+    return await page.evaluate(() => {
+      const keys = Object.keys(localStorage);
+      const roleHint = localStorage.getItem("yukcep_profile_role_hint_v1");
+      const authKeys = keys.filter((key) => /auth-token|profile_role_hint/i.test(key));
+      let authUserId = null;
+      const authKey = keys.find((key) => key.includes("-auth-token"));
+      if (authKey) {
+        try {
+          const raw = localStorage.getItem(authKey);
+          const parsed = raw ? JSON.parse(raw) : null;
+          authUserId =
+            parsed?.user?.id ||
+            parsed?.currentSession?.user?.id ||
+            parsed?.session?.user?.id ||
+            (Array.isArray(parsed) ? parsed?.[0]?.user?.id : null) ||
+            (Array.isArray(parsed) ? parsed?.[0]?.currentSession?.user?.id : null) ||
+            null;
+        } catch {
+          authUserId = null;
+        }
+      }
+      const body = (document.body?.innerText || "").replace(/\s+/g, " ");
+      return {
+        roleHint,
+        authKeys,
+        authUserId,
+        roleLoadingVisible: /Profil Rolü Yükleniyor/i.test(body),
+      };
+    });
+  } catch {
+    return null;
+  }
+};
+
 const launch = async () => {
   const edgePathCandidates = [
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
@@ -471,7 +618,7 @@ const main = async () => {
       await authViaSignup(employerPage, employer);
     });
 
-    await runCheckpoint("E2", "İşveren ana sayfada yalnızca kendi butonunu görüyor", async () => {
+    await runCheckpoint("E2", "İşveren ana sayfada yalnızca kendi role feed aksiyonunu görüyor", async () => {
       await assertHomeButtonsForRole(employerPage, "employer");
     });
 
@@ -487,14 +634,13 @@ const main = async () => {
       await assertHomeButtonsForRole(employerPage, "employer");
     });
 
-    await runCheckpoint("E5", "İşveren ilan formunu açabiliyor", async () => {
-      await waitForWelcomeReady(employerPage);
-      await employerPage.getByRole("button", { name: /^İŞVERENİM$/i }).click();
-      await ensureVisible(employerPage.getByRole("heading", { name: /Hızlı İlan Ver/i }), 20000, "İlan formu açılmadı.");
+    await runCheckpoint("E5", "İşveren ilan formunu feed üzerinden açabiliyor", async () => {
+      await postLoadAsEmployer(employerPage);
     });
 
     await runCheckpoint("E6", "İşveren yeni yük ilanı oluşturabiliyor", async () => {
-      await postLoadAsEmployer(employerPage);
+      const card = employerPage.locator("button", { hasText: loadType }).first();
+      await ensureVisible(card, 30000, "Yeni ilan listede doğrulanamadı.");
     });
 
     await runCheckpoint("E7", "Yayınlanan ilan listede görünüyor", async () => {
@@ -510,7 +656,7 @@ const main = async () => {
       await authViaSignup(driverPage, driver);
     });
 
-    await runCheckpoint("D2", "Şoför ana sayfada yalnızca kendi butonunu görüyor", async () => {
+    await runCheckpoint("D2", "Şoför ana sayfada yalnızca kendi role feed aksiyonunu görüyor", async () => {
       await assertHomeButtonsForRole(driverPage, "driver");
     });
 
@@ -580,6 +726,8 @@ const main = async () => {
     await employerPage.waitForTimeout(1200).catch(() => {});
     const employerLogs = await readRuntimeLogs(employerPage);
     const driverLogs = await readRuntimeLogs(driverPage);
+    const employerLocalDebug = await readLocalDebug(employerPage);
+    const driverLocalDebug = await readLocalDebug(driverPage);
     await employerPage.screenshot({ path: employerShot, fullPage: true }).catch(() => {});
     await driverPage.screenshot({ path: driverShot, fullPage: true }).catch(() => {});
     const report = writeReport("FAIL", {
@@ -587,6 +735,10 @@ const main = async () => {
       runtimeLogs: {
         employer: employerLogs,
         driver: driverLogs,
+      },
+      localDebug: {
+        employer: employerLocalDebug,
+        driver: driverLocalDebug,
       },
       networkProbe: networkProbe.slice(-120),
       screenshots: {

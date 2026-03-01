@@ -56,29 +56,56 @@ export default function AuthScreen({ onBack, onAuthSuccess }) {
       setLoading(false);
       return;
     }
-    // Insert profile
+    // Persist profile with selected role (insert/update safe)
     if (data.user) {
-      const { error: profileError } = await supabase.from("profiles").insert([
-        {
-          id: data.user.id,
-          full_name: fullName.trim(),
-          email: email.trim(),
-          phone: phone.trim(),
-          role: role,
-        },
-      ]);
+      const profilePayload = {
+        id: data.user.id,
+        full_name: fullName.trim(),
+        email: email.trim(),
+        phone: phone.trim(),
+        role,
+      };
+      const { error: profileError } = await supabase
+        .from("profiles")
+        .upsert([profilePayload], { onConflict: "id" });
       if (profileError) {
         console.error("Profile insert error:", profileError);
         setError("Hesap oluşturuldu fakat profil kaydedilemedi: " + profileError.message);
         setLoading(false);
         return;
       }
+      const { data: savedProfile, error: savedProfileError } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", data.user.id)
+        .single();
+      if (savedProfileError) {
+        console.error("Profile fetch after signup error:", savedProfileError);
+      }
+      if (savedProfile?.role !== role) {
+        const { error: roleFixError } = await supabase
+          .from("profiles")
+          .update({ role })
+          .eq("id", data.user.id);
+        if (roleFixError) {
+          console.error("Profile role force update error:", roleFixError);
+          setError("Profil rolü güncellenemedi: " + roleFixError.message);
+          setLoading(false);
+          return;
+        }
+      }
       // If email confirmation is required
       if (data.session) {
         // Auto-confirmed, proceed
-        const profile = { id: data.user.id, full_name: fullName.trim(), phone: phone.trim(), role };
+        const profile = {
+          id: data.user.id,
+          full_name: fullName.trim(),
+          email: email.trim(),
+          phone: phone.trim(),
+          role,
+        };
         setLoading(false);
-        onAuthSuccess(data.user, profile);
+        onAuthSuccess(data.user, savedProfile?.role === role ? savedProfile : profile);
       } else {
         // Email confirmation needed
         setLoading(false);

@@ -9,9 +9,11 @@ import {
   createNotificationApi,
   ensureProfileApi,
   fetchDriverFeedApi,
+  fetchDriverFeedViaRestApi,
   fetchBidsForLoadApi,
   fetchBidsForLoadViaRestApi,
   fetchEmployerFeedApi,
+  fetchEmployerFeedViaRestApi,
   fetchLoadDetailsApi,
   fetchLoadDetailsViaRestApi,
   fetchLoadsApi,
@@ -25,7 +27,9 @@ import {
   markNotificationReadApi,
   updateProfileRoleApi,
   updateLoadStatusApi,
+  updateLoadStatusViaRestApi,
   updateBidStatusApi,
+  updateBidStatusViaRestApi,
 } from './lib/api';
 import { mapDbToUi } from './lib/loadMapper';
 import AuthScreen from './components/AuthScreen';
@@ -85,8 +89,51 @@ const RELEASE_UPDATES_SEED = [
 const LOG_STORAGE_KEY = "yukcep_runtime_logs_v1";
 const PUBLIC_STATS_CACHE_KEY = "yukcep_public_stats_cache_v1";
 const RELEASE_UPDATES_KEY = "yukcep_release_updates_v1";
+const ROLE_HINT_KEY = "yukcep_profile_role_hint_v1";
 const REMOTE_LOG_FLUSH_SIZE = 6;
 const REMOTE_LOG_FLUSH_DELAY_MS = 2200;
+
+const normalizeRoleHint = (role) => {
+  if (role === "employer") return "employer";
+  if (role === "driver") return "driver";
+  return null;
+};
+
+const readRoleHint = (userId) => {
+  try {
+    const raw = localStorage.getItem(ROLE_HINT_KEY);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        if (userId && parsed.userId && parsed.userId !== userId) return null;
+        return normalizeRoleHint(parsed.role);
+      }
+    } catch {
+      // legacy plain-string cache
+    }
+    return normalizeRoleHint(raw);
+  } catch {
+    return null;
+  }
+};
+
+const writeRoleHint = (role, userId) => {
+  const normalized = normalizeRoleHint(role);
+  if (!normalized) return;
+  try {
+    localStorage.setItem(
+      ROLE_HINT_KEY,
+      JSON.stringify({
+        role: normalized,
+        userId: userId || null,
+        updatedAt: Date.now(),
+      })
+    );
+  } catch {
+    // ignore storage failures
+  }
+};
 
 const sanitizeRemoteLogDetails = (value = "") =>
   String(value || "")
@@ -757,11 +804,27 @@ export default function App() {
     setIsFeedLoading(true);
     setFeedError("");
     try {
-      const feed = await withTimeout(
-        fetchDriverFeedApi({ userId: user.id }),
-        12000,
-        "Şoför feed sorgusu zaman aşımına uğradı (12sn)."
-      );
+      let feed = [];
+      try {
+        feed = await withTimeout(
+          fetchDriverFeedApi({ userId: user.id }),
+          12000,
+          "Şoför feed sorgusu zaman aşımına uğradı (12sn)."
+        );
+      } catch (primaryError) {
+        appendRuntimeLog("warn", "DRIVER_FEED_SUPABASE_FAIL", primaryError?.message || "Driver feed timeout");
+        const accessToken = readCachedAccessToken();
+        feed = await withTimeout(
+          fetchDriverFeedViaRestApi({
+            userId: user.id,
+            accessToken,
+            timeoutMs: 13000,
+          }),
+          14000,
+          "Şoför feed fallback zaman aşımına uğradı (14sn)."
+        );
+        appendRuntimeLog("info", "DRIVER_FEED_REST_OK", `rows=${(feed || []).length}`);
+      }
       setDriverFeedItems(feed || []);
       appendRuntimeLog("info", "DRIVER_FEED_OK", `rows=${(feed || []).length}`);
     } catch (error) {
@@ -777,11 +840,27 @@ export default function App() {
     setIsFeedLoading(true);
     setFeedError("");
     try {
-      const feed = await withTimeout(
-        fetchEmployerFeedApi({ userId: user.id }),
-        12000,
-        "İşveren feed sorgusu zaman aşımına uğradı (12sn)."
-      );
+      let feed = [];
+      try {
+        feed = await withTimeout(
+          fetchEmployerFeedApi({ userId: user.id }),
+          12000,
+          "İşveren feed sorgusu zaman aşımına uğradı (12sn)."
+        );
+      } catch (primaryError) {
+        appendRuntimeLog("warn", "EMPLOYER_FEED_SUPABASE_FAIL", primaryError?.message || "Employer feed timeout");
+        const accessToken = readCachedAccessToken();
+        feed = await withTimeout(
+          fetchEmployerFeedViaRestApi({
+            userId: user.id,
+            accessToken,
+            timeoutMs: 13000,
+          }),
+          14000,
+          "İşveren feed fallback zaman aşımına uğradı (14sn)."
+        );
+        appendRuntimeLog("info", "EMPLOYER_FEED_REST_OK", `rows=${(feed || []).length}`);
+      }
       setEmployerFeedItems(feed || []);
       appendRuntimeLog("info", "EMPLOYER_FEED_OK", `rows=${(feed || []).length}`);
     } catch (error) {
@@ -1001,37 +1080,105 @@ export default function App() {
       return;
     }
     try {
+      appendRuntimeLog("info", "BID_DECISION_STARTED", `bid=${bidId} action=${action}`);
+      const accessToken = readCachedAccessToken();
       const pickupDateText = selectedLoadDetail?.raw?.pickup_date
         ? formatDateOnly(selectedLoadDetail.raw.pickup_date)
         : "Belirlenecek";
+      const updateBidStatusReliable = async (targetBidId, targetStatus, timeoutMs) => {
+        if (accessToken) {
+          try {
+            const restResult = await withTimeout(
+              updateBidStatusViaRestApi({
+                bidId: targetBidId,
+                status: targetStatus,
+                accessToken,
+                timeoutMs: Math.max(5000, timeoutMs - 1000),
+              }),
+              timeoutMs + 1500,
+              `Teklif durumu REST güncellenemedi (${Math.ceil((timeoutMs + 1500) / 1000)}sn).`
+            );
+            if (restResult?.id) return restResult;
+            throw new Error("REST update boş döndü.");
+          } catch (restError) {
+            appendRuntimeLog("warn", "BID_DECISION_BID_REST_FAIL", restError?.message || "Bid REST failed");
+          }
+        }
+        const primaryResult = await withTimeout(
+          updateBidStatusApi({ bidId: targetBidId, status: targetStatus }),
+          timeoutMs,
+          `Teklif durumu güncellenemedi (${Math.ceil(timeoutMs / 1000)}sn).`
+        );
+        if (!primaryResult?.id) {
+          throw new Error("Teklif durumu güncellendi ama satır dönmedi.");
+        }
+        return primaryResult;
+      };
+      const updateLoadStatusReliable = async (targetLoadId, targetStatus, timeoutMs) => {
+        if (accessToken) {
+          try {
+            const restResult = await withTimeout(
+              updateLoadStatusViaRestApi({
+                loadId: targetLoadId,
+                status: targetStatus,
+                accessToken,
+                timeoutMs: Math.max(5000, timeoutMs - 1000),
+              }),
+              timeoutMs + 1500,
+              `İlan durumu REST güncellenemedi (${Math.ceil((timeoutMs + 1500) / 1000)}sn).`
+            );
+            if (restResult?.id) return restResult;
+            throw new Error("REST load update boş döndü.");
+          } catch (restError) {
+            appendRuntimeLog("warn", "BID_DECISION_LOAD_REST_FAIL", restError?.message || "Load REST failed");
+          }
+        }
+        const primaryResult = await withTimeout(
+          updateLoadStatusApi({ loadId: targetLoadId, status: targetStatus }),
+          timeoutMs,
+          `İlan durumu güncellenemedi (${Math.ceil(timeoutMs / 1000)}sn).`
+        );
+        if (!primaryResult?.id) {
+          throw new Error("İlan durumu güncellendi ama satır dönmedi.");
+        }
+        return primaryResult;
+      };
 
       // 1. Update Bid
-      await updateBidStatusApi({ bidId, status: action });
+      await updateBidStatusReliable(bidId, action, 15000);
 
       // 2. Notify Driver (non-blocking)
       const statusText = action === 'ACCEPTED' ? 'KABUL EDİLDİ ✅' : 'REDDEDİLDİ ❌';
       try {
-        await createNotificationApi({
-          userId: driverId,
-          actorId: user.id,
-          message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to}. Yükleme: ${pickupDateText}.`,
-        });
+        await withTimeout(
+          createNotificationApi({
+            userId: driverId,
+            actorId: user.id,
+            message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to}. Yükleme: ${pickupDateText}.`,
+          }),
+          10000,
+          "Teklif karar bildirimi zaman aşımına uğradı (10sn)."
+        );
       } catch (notifyDriverError) {
         appendRuntimeLog("warn", "BID_NOTIFY_DECISION_WARN", notifyDriverError?.message || "Decision notify failed");
       }
 
       if (action === "ACCEPTED") {
         // Keep marketplace consistent: accepted offer closes load and rejects pending alternatives.
-        await updateLoadStatusApi({ loadId: selectedLoadDetail.id, status: "assigned" });
+        await updateLoadStatusReliable(selectedLoadDetail.id, "assigned", 15000);
         const pendingOthers = loadBids.filter((bid) => bid.id !== bidId && bid.status === "PENDING");
         for (const otherBid of pendingOthers) {
-          await updateBidStatusApi({ bidId: otherBid.id, status: "REJECTED" });
+          await updateBidStatusReliable(otherBid.id, "REJECTED", 12000);
           try {
-            await createNotificationApi({
-              userId: otherBid.driver_id,
-              actorId: user.id,
-              message: `Bilgi: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanında başka teklif kabul edildi.`,
-            });
+            await withTimeout(
+              createNotificationApi({
+                userId: otherBid.driver_id,
+                actorId: user.id,
+                message: `Bilgi: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanında başka teklif kabul edildi.`,
+              }),
+              10000,
+              "Alternatif teklif bildirimi zaman aşımına uğradı (10sn)."
+            );
           } catch (notifyOtherError) {
             appendRuntimeLog("warn", "BID_NOTIFY_OTHER_WARN", notifyOtherError?.message || "Other notify failed");
           }
@@ -1064,7 +1211,7 @@ export default function App() {
   const handleSwitchRole = async (nextRole) => {
     if (!user || !nextRole) return;
     const normalizedRole = String(nextRole).toLowerCase() === "employer" ? "employer" : "driver";
-    if (profile?.role === normalizedRole) {
+    if (activeRole === normalizedRole) {
       showToast("Rol zaten aktif.");
       return;
     }
@@ -1076,6 +1223,7 @@ export default function App() {
         "Rol güncelleme zaman aşımına uğradı (12sn)."
       );
       setProfile(updated);
+      writeRoleHint(updated?.role || normalizedRole, user.id);
       setShowProfileCard(false);
       setShowSettingsPanel(false);
       setScreen("welcome");
@@ -1102,13 +1250,43 @@ export default function App() {
 
   // Auth state change listener
   useEffect(() => {
+    const applySessionUser = async (sessionUser) => {
+      setUser(sessionUser);
+      let fetchedProfile = null;
+      try {
+        fetchedProfile = await fetchProfileById(sessionUser.id);
+      } catch (error) {
+        console.error("Profile fetch failed:", error);
+      }
+
+      const persistedRole = normalizeRoleHint(fetchedProfile?.role);
+      if (persistedRole) {
+        setProfile(fetchedProfile);
+        writeRoleHint(persistedRole, sessionUser.id);
+        return;
+      }
+
+      const hintedRole = readRoleHint(sessionUser.id) || normalizeRoleHint(sessionUser?.user_metadata?.role);
+      if (!hintedRole) return;
+      writeRoleHint(hintedRole, sessionUser.id);
+      setProfile((prev) => ({
+        id: sessionUser.id,
+        full_name:
+          fetchedProfile?.full_name ||
+          prev?.full_name ||
+          sessionUser?.user_metadata?.full_name ||
+          sessionUser?.email ||
+          "Kullanıcı",
+        email: fetchedProfile?.email || prev?.email || sessionUser?.email || "",
+        phone: fetchedProfile?.phone || prev?.phone || sessionUser?.user_metadata?.phone || "",
+        role: hintedRole,
+      }));
+    };
+
     // Check current session on mount
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
-        setUser(session.user);
-        fetchProfileById(session.user.id)
-          .then((data) => setProfile(data))
-          .catch((error) => console.error("Profile fetch on mount failed:", error));
+        applySessionUser(session.user);
       }
     });
 
@@ -1116,13 +1294,7 @@ export default function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
         if (session?.user) {
-          setUser(session.user);
-          try {
-            const data = await fetchProfileById(session.user.id);
-            if (data) setProfile(data);
-          } catch (error) {
-            console.error("Profile fetch on auth change failed:", error);
-          }
+          await applySessionUser(session.user);
         } else {
           setUser(null);
           setProfile(null);
@@ -1146,6 +1318,11 @@ export default function App() {
         } catch {
           // ignore storage failures
         }
+      }
+      try {
+        localStorage.removeItem(ROLE_HINT_KEY);
+      } catch {
+        // ignore storage failures
       }
       setUser(null);
       setProfile(null);
@@ -1176,9 +1353,11 @@ export default function App() {
   const handleAuthSuccess = (authUser, authProfile) => {
     setUser(authUser);
     setProfile(authProfile);
+    writeRoleHint(authProfile?.role, authUser?.id);
     setScreen("welcome");
     showToast("✅ Giriş başarılı!");
   };
+  const activeRole = normalizeRoleHint(profile?.role) || (user ? readRoleHint(user.id) : null);
 
   const getInitials = (name) => {
     if (!name) return "?";
@@ -1190,7 +1369,11 @@ export default function App() {
       .slice(0, 2);
   };
 
-  const getProfileRoleLabel = (role) => (role === "employer" ? "İşverenim" : "İş Arıyorum");
+  const getProfileRoleLabel = (role) => {
+    if (role === "employer") return "İşverenim";
+    if (role === "driver") return "İş Arıyorum";
+    return "Kullanıcı";
+  };
   const formatDateTime = (value) => {
     if (!value) return "Belirsiz";
     try {
@@ -1232,12 +1415,16 @@ export default function App() {
       nav("auth");
       return;
     }
-    if (profile?.role === "employer") {
+    if (!activeRole) {
+      showToast("Profil rolü yükleniyor, lütfen tekrar dene.", "error");
+      return;
+    }
+    if (activeRole === "employer") {
       nav("employerFeed");
       return;
     }
     nav("driverFeed");
-  }, [nav, profile?.role, user]);
+  }, [activeRole, nav, user]);
 
   // ─── FILTERS ───
   const [filterFrom, setFilterFrom] = useState("");
@@ -1508,7 +1695,7 @@ export default function App() {
               email: user.email,
               fullName: profile?.full_name || user.user_metadata?.full_name,
               phone: profile?.phone,
-              role: profile?.role || "employer",
+              role: activeRole || "employer",
             }),
             12000,
             "Profil onarımı zaman aşımına uğradı (12sn)."
@@ -1548,7 +1735,7 @@ export default function App() {
           full_name: profile?.full_name || user?.email || "İşveren",
           avatar_url: profile?.avatar_url || null,
           phone: profile?.phone || null,
-          role: profile?.role || "employer",
+          role: activeRole || "employer",
         },
       };
       const optimisticUiLoad = mapDbToUi(optimisticDbLoad);
@@ -1662,7 +1849,7 @@ export default function App() {
 
     const steps = [
       { id: "S1", title: "Kullanıcı oturumu açık mı?", passed: Boolean(user?.id) },
-      { id: "S2", title: "Profil rolü çözüldü mü? (driver/employer)", passed: Boolean(profile?.role) },
+      { id: "S2", title: "Profil rolü çözüldü mü? (driver/employer)", passed: Boolean(activeRole) },
       { id: "S3", title: "Açık yük listesi yükleniyor mu?", passed: !isLoading },
       { id: "S4", title: "Şoför teklif oluşturabiliyor mu?", passed: driverFeedItems.length > 0 },
       { id: "S5", title: "İşveren kendi ilanına gelen teklifleri görüyor mu?", passed: employerHasIncomingBids },
@@ -1680,15 +1867,14 @@ export default function App() {
         state: unlocked ? (step.passed ? "pass" : "check") : "locked",
       };
     });
-  }, [driverFeedItems, employerFeedItems, isLoading, notifications, profile?.role, runtimeLogs, user?.id]);
+  }, [activeRole, driverFeedItems, employerFeedItems, isLoading, notifications, runtimeLogs, user?.id]);
 
   // animated stats
   const statLoads = useAnimatedCount(publicStats.activeLoads);
   const statDrivers = useAnimatedCount(publicStats.activeDrivers);
   const statCities = useAnimatedCount(publicStats.activeCities);
-  const activeRole = profile?.role === "employer" ? "employer" : profile?.role === "driver" ? "driver" : null;
-  const showDriverHomeAction = !user || activeRole !== "employer";
-  const showEmployerHomeAction = !user || activeRole !== "driver";
+  const showDriverHomeAction = !user;
+  const showEmployerHomeAction = !user;
 
   return (
     <div className="app-shell min-h-screen flex items-center justify-center p-3 sm:p-5">
@@ -1814,10 +2000,18 @@ export default function App() {
                                 </div>
                               </div>
                               <div>
-                                <p className="text-white font-bold text-base tracking-tight">{profile?.full_name || getProfileRoleLabel(profile?.role)}</p>
+                                <p className="text-white font-bold text-base tracking-tight">{profile?.full_name || getProfileRoleLabel(activeRole)}</p>
                                 <p className="text-slate-400 text-xs font-medium mb-1">{user.email}</p>
-                                <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${profile?.role === "driver" ? "bg-blue-500/10 text-blue-400 border-blue-500/20" : "bg-orange-500/10 text-orange-400 border-orange-500/20"}`}>
-                                  {profile?.role === "driver" ? "🚛 İş Arıyorum" : "🏢 İşverenim"}
+                                <span
+                                  className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
+                                    activeRole === "driver"
+                                      ? "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                                      : activeRole === "employer"
+                                        ? "bg-orange-500/10 text-orange-400 border-orange-500/20"
+                                        : "bg-slate-700/50 text-slate-300 border-slate-600/50"
+                                  }`}
+                                >
+                                  {activeRole === "driver" ? "🚛 İş Arıyorum" : activeRole === "employer" ? "🏢 İşverenim" : "⏳ Rol Yükleniyor"}
                                 </span>
                               </div>
                             </div>
@@ -1837,9 +2031,9 @@ export default function App() {
                               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-slate-300 font-bold text-sm hover:bg-white/5 transition-all active:scale-95 group"
                             >
                               <span className="bg-slate-800 p-1.5 rounded-lg group-hover:bg-slate-700 transition-colors">
-                                {profile?.role === "employer" ? "📋" : "🧭"}
+                                {activeRole === "employer" ? "📋" : activeRole === "driver" ? "🧭" : "⏳"}
                               </span>
-                              {profile?.role === "employer" ? "İşveren Feed" : "İş Arıyorum Feed"}
+                              {activeRole === "employer" ? "İşveren Feed" : activeRole === "driver" ? "İş Arıyorum Feed" : "Feed Hazırlanıyor"}
                             </button>
                             <button
                               onClick={() => {
@@ -1920,9 +2114,18 @@ export default function App() {
                   {user && (
                     <button
                       onClick={openRoleFeed}
-                      className="w-full py-3 px-4 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 text-cyan-200 font-black text-sm active:scale-[0.98] transition-all"
+                      disabled={!activeRole}
+                      className={`w-full py-3 px-4 rounded-2xl border text-sm font-black transition-all ${
+                        activeRole
+                          ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-200 active:scale-[0.98]"
+                          : "border-slate-600/40 bg-slate-800/60 text-slate-400 cursor-wait"
+                      }`}
                     >
-                      {profile?.role === "employer" ? "📋 İşveren Feed'e Git" : "🧭 İş Arıyorum Feed'e Git"}
+                      {activeRole === "employer"
+                        ? "📋 İşveren Feed'e Git"
+                        : activeRole === "driver"
+                          ? "🧭 İş Arıyorum Feed'e Git"
+                          : "⏳ Profil Rolü Yükleniyor"}
                     </button>
                   )}
                 </div>
@@ -2047,13 +2250,22 @@ export default function App() {
                   <h2 className="text-white text-3xl font-black tracking-tight">🧭 İş Arıyorum Feed</h2>
                   <p className="text-slate-400 text-sm mt-1">Tekliflerim, kararlar ve planlanan yükleme tarihleri.</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={loadDriverFeed}
-                  className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-xs font-bold"
-                >
-                  Yenile
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => nav("location")}
+                    className="px-3 py-2 rounded-xl bg-blue-600/20 border border-blue-500/40 text-blue-200 text-xs font-bold"
+                  >
+                    Yük Ara
+                  </button>
+                  <button
+                    type="button"
+                    onClick={loadDriverFeed}
+                    className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-xs font-bold"
+                  >
+                    Yenile
+                  </button>
+                </div>
               </div>
 
               {feedError && (
@@ -2147,13 +2359,22 @@ export default function App() {
                   <h2 className="text-white text-3xl font-black tracking-tight">📋 İşveren Feed</h2>
                   <p className="text-slate-400 text-sm mt-1">İlanlarım, teklifler ve kabul/red karar takibi.</p>
                 </div>
-                <button
-                  type="button"
-                  onClick={loadEmployerFeed}
-                  className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-xs font-bold"
-                >
-                  Yenile
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => nav("employer")}
+                    className="px-3 py-2 rounded-xl bg-orange-500/20 border border-orange-500/40 text-orange-200 text-xs font-bold"
+                  >
+                    Yeni İlan Ver
+                  </button>
+                  <button
+                    type="button"
+                    onClick={loadEmployerFeed}
+                    className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 text-xs font-bold"
+                  >
+                    Yenile
+                  </button>
+                </div>
               </div>
 
               {feedError && (
@@ -2962,7 +3183,7 @@ export default function App() {
                         disabled={isUpdatingRole}
                         onClick={() => handleSwitchRole("driver")}
                         className={`py-2.5 rounded-lg text-xs font-black border transition-all active:scale-95 ${
-                          profile?.role === "driver"
+                          activeRole === "driver"
                             ? "bg-blue-500/20 text-blue-300 border-blue-500/40"
                             : "bg-slate-900 text-slate-300 border-slate-700"
                         } ${isUpdatingRole ? "opacity-60 cursor-not-allowed" : ""}`}
@@ -2974,7 +3195,7 @@ export default function App() {
                         disabled={isUpdatingRole}
                         onClick={() => handleSwitchRole("employer")}
                         className={`py-2.5 rounded-lg text-xs font-black border transition-all active:scale-95 ${
-                          profile?.role === "employer"
+                          activeRole === "employer"
                             ? "bg-orange-500/20 text-orange-300 border-orange-500/40"
                             : "bg-slate-900 text-slate-300 border-slate-700"
                         } ${isUpdatingRole ? "opacity-60 cursor-not-allowed" : ""}`}
