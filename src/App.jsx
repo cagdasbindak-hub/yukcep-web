@@ -69,6 +69,7 @@ const empReviews = {
 const getER = name => empReviews[name] || empReviews["default"];
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Yük listesi sorgusu tekilleştirildi; REST fallback başarılı olduğunda çift WARN/INFO log tekrarları azaltıldı." },
   { date: "2026-03-01", title: "Canlı sayaçlarda public stats sorgusu tekilleştirildi; fallback başarılıysa gereksiz timeout WARN logları azaltıldı." },
   { date: "2026-02-28", title: "Şoför ve işveren için ayrı Feed ekranları eklendi." },
   { date: "2026-02-28", title: "10 adımlı E2E senaryo checklist ekranı feed içine eklendi." },
@@ -94,6 +95,7 @@ const ROLE_HINT_KEY = "yukcep_profile_role_hint_v1";
 const REMOTE_LOG_FLUSH_SIZE = 6;
 const REMOTE_LOG_FLUSH_DELAY_MS = 2200;
 const PUBLIC_STATS_FETCH_COOLDOWN_MS = 2500;
+const LOADS_FETCH_COOLDOWN_MS = 1800;
 
 const normalizeRoleHint = (role) => {
   if (role === "employer") return "employer";
@@ -375,6 +377,9 @@ export default function App() {
   const latestRealLoadsRef = useRef([]);
   const publicStatsFetchPromiseRef = useRef(null);
   const publicStatsLastFetchAtRef = useRef(0);
+  const loadsFetchPromiseRef = useRef(null);
+  const loadsLastFetchAtRef = useRef(0);
+  const loadsFetchKeyRef = useRef("");
 
   useEffect(() => {
     latestRealLoadsRef.current = realLoads;
@@ -1204,7 +1209,7 @@ export default function App() {
       );
       appendRuntimeLog("info", "BID_DECISION_OK", `bid=${bidId} action=${action}`);
       showToast(`Teklif ${action === 'ACCEPTED' ? 'kabul' : 'red'} edildi.`);
-      fetchLoads();
+      fetchLoads({ force: true });
       fetchPublicStats();
       if (screen === "employerFeed") {
         loadEmployerFeed();
@@ -1527,37 +1532,74 @@ export default function App() {
     return publicStatsFetchPromiseRef.current;
   }, [appendRuntimeLog, applyLocalStatsFallback, persistPublicStats, withTimeout]);
 
-  const fetchLoads = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const data = await withTimeout(
-        fetchLoadsApi({ filterFrom, filterTo, filterTrailer }),
-        10000,
-        "Yük listesi sorgusu zaman aşımına uğradı (10sn)."
-      );
-      const mappedLoads = data.map((l) => mapDbToUi(l));
-      setRealLoads(mappedLoads);
-      return;
-    } catch (error) {
-      appendRuntimeLog("warn", "LOADS_SUPABASE_FAIL", error?.message || "Supabase loads failed");
+  const fetchLoads = useCallback((options = {}) => {
+    const force = options?.force === true;
+    const now = Date.now();
+    const key = `${String(filterFrom || "").trim().toLocaleLowerCase("tr-TR")}|${String(filterTo || "")
+      .trim()
+      .toLocaleLowerCase("tr-TR")}|${String(filterTrailer || "").trim().toLocaleLowerCase("tr-TR")}`;
+
+    if (!force && loadsFetchPromiseRef.current && loadsFetchKeyRef.current === key) {
+      return loadsFetchPromiseRef.current;
+    }
+    if (
+      !force &&
+      loadsFetchKeyRef.current === key &&
+      now - loadsLastFetchAtRef.current < LOADS_FETCH_COOLDOWN_MS
+    ) {
+      return Promise.resolve(null);
     }
 
-    try {
-      const restData = await fetchLoadsViaRestApi({
-        filterFrom,
-        filterTo,
-        filterTrailer,
-        timeoutMs: 12000,
-      });
-      const mappedLoads = restData.map((l) => mapDbToUi(l));
-      setRealLoads(mappedLoads);
-      appendRuntimeLog("info", "LOADS_REST_OK", `rows=${mappedLoads.length}`);
-    } catch (restError) {
-      console.error("Error fetching loads:", restError);
-      appendRuntimeLog("error", "LOADS_FETCH_FAIL", restError?.message || "Loads fetch failed");
-    } finally {
-      setIsLoading(false);
-    }
+    const request = (async () => {
+      loadsLastFetchAtRef.current = Date.now();
+      loadsFetchKeyRef.current = key;
+      setIsLoading(true);
+      let supabaseError = null;
+
+      try {
+        const data = await withTimeout(
+          fetchLoadsApi({ filterFrom, filterTo, filterTrailer }),
+          10000,
+          "Yük listesi sorgusu zaman aşımına uğradı (10sn)."
+        );
+        const mappedLoads = data.map((l) => mapDbToUi(l));
+        setRealLoads(mappedLoads);
+        return mappedLoads;
+      } catch (error) {
+        supabaseError = error;
+      }
+
+      try {
+        const restData = await fetchLoadsViaRestApi({
+          filterFrom,
+          filterTo,
+          filterTrailer,
+          timeoutMs: 12000,
+        });
+        const mappedLoads = restData.map((l) => mapDbToUi(l));
+        setRealLoads(mappedLoads);
+        if (supabaseError) {
+          appendRuntimeLog("info", "LOADS_SUPABASE_FALLBACK", supabaseError?.message || "Supabase loads failed, REST fallback used.");
+        }
+        appendRuntimeLog("info", "LOADS_REST_OK", `rows=${mappedLoads.length}`);
+        return mappedLoads;
+      } catch (restError) {
+        if (supabaseError) {
+          appendRuntimeLog("warn", "LOADS_SUPABASE_FAIL", supabaseError?.message || "Supabase loads failed");
+        }
+        console.error("Error fetching loads:", restError);
+        appendRuntimeLog("error", "LOADS_FETCH_FAIL", restError?.message || "Loads fetch failed");
+        return null;
+      } finally {
+        setIsLoading(false);
+      }
+    })();
+
+    loadsFetchPromiseRef.current = request.finally(() => {
+      loadsFetchPromiseRef.current = null;
+    });
+
+    return loadsFetchPromiseRef.current;
   }, [appendRuntimeLog, filterFrom, filterTo, filterTrailer, withTimeout]);
 
   // Fetch Loads from Supabase
@@ -1592,7 +1634,7 @@ export default function App() {
         "postgres_changes",
         { event: "*", schema: "public", table: "loads" },
         () => {
-          fetchLoads();
+          fetchLoads({ force: true });
           fetchPublicStats();
         }
       )
@@ -1788,7 +1830,7 @@ export default function App() {
       setFormErrors({});
       try {
         await withTimeout(
-          Promise.all([fetchLoads(), fetchPublicStats()]),
+          Promise.all([fetchLoads({ force: true }), fetchPublicStats({ force: true })]),
           12000,
           "Liste yenileme zaman aşımına uğradı (12sn)."
         );
@@ -1796,8 +1838,8 @@ export default function App() {
         appendRuntimeLog("warn", "POST_LOAD_REFRESH_WARN", refreshError?.message || "Refresh timeout");
         showToast("İlan yayınlandı. Liste arka planda güncelleniyor.", "success", 7000);
         setTimeout(() => {
-          fetchLoads();
-          fetchPublicStats();
+          fetchLoads({ force: true });
+          fetchPublicStats({ force: true });
         }, 2500);
       }
       setFilterFrom(loadData.origin_city);
@@ -2530,7 +2572,7 @@ export default function App() {
                   <span className="text-2xl mb-1 group-hover:scale-110 transition-transform">📅</span>
                   <span className="text-slate-300 font-extrabold text-[10px] uppercase tracking-wide">Takvim</span>
                 </button>
-                <button onClick={() => { setSelectedLoad(null); setDetailTab("detail"); fetchLoads(); }} className="flex flex-col items-center justify-center py-3 rounded-2xl text-center bg-slate-800 border border-slate-700 active:scale-95 transition-all group hover-scale">
+                <button onClick={() => { setSelectedLoad(null); setDetailTab("detail"); fetchLoads({ force: true }); }} className="flex flex-col items-center justify-center py-3 rounded-2xl text-center bg-slate-800 border border-slate-700 active:scale-95 transition-all group hover-scale">
                   <span className="text-2xl mb-1 group-hover:rotate-180 transition-transform duration-500">🔄</span>
                   <span className="text-slate-300 font-extrabold text-[10px] uppercase tracking-wide">Yenile</span>
                 </button>
