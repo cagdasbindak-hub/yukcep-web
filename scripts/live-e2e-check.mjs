@@ -61,6 +61,12 @@ const ensureVisible = async (locator, timeout = 30000, message = "Element buluna
 };
 
 const isVisible = async (locator) => locator.isVisible().catch(() => false);
+const anyVisible = async (locators = []) => {
+  for (const locator of locators) {
+    if (await isVisible(locator)) return true;
+  }
+  return false;
+};
 
 const waitForWelcomeReady = async (page, options = {}) => {
   if (options.navigate !== false) {
@@ -150,7 +156,7 @@ const authViaSignup = async (page, user) => {
   throw new Error("Signup sonrası welcome ekranına dönülemedi.");
 };
 
-const postLoadAsEmployer = async (page) => {
+const openEmployerPostForm = async (page) => {
   await waitForWelcomeReady(page);
   const employerFeedButton = page.getByRole("button", { name: employerFeedActionPattern });
   await ensureVisible(employerFeedButton, 20000, "İşveren feed butonu bulunamadı.");
@@ -162,7 +168,17 @@ const postLoadAsEmployer = async (page) => {
     25000,
     "İşveren ilan ekranı açılmadı."
   );
+};
 
+const verifyEmployerFormValidation = async (page) => {
+  await openEmployerPostForm(page);
+  await page.getByRole("button", { name: /İLANI YAYINLA|FİLO İLANI YAYINLA/i }).click();
+  const requiredError = page.getByText(/Nereden bilgisi gerekli|Nereye bilgisi gerekli|Yük cinsi gerekli|Fiyat gerekli/i);
+  await ensureVisible(requiredError.first(), 10000, "İşveren form zorunlu alan validasyonu görünmedi.");
+};
+
+const postLoadAsEmployer = async (page) => {
+  await openEmployerPostForm(page);
   const selects = page.locator("fieldset select");
   await selects.nth(0).selectOption(fromCity);
   await selects.nth(1).selectOption(toCity);
@@ -176,6 +192,26 @@ const postLoadAsEmployer = async (page) => {
 
   const card = page.locator("button", { hasText: loadType }).first();
   await ensureVisible(card, 45000, "Yayınlanan ilan listede görünmedi.");
+};
+
+const clickTopBack = async (page) => {
+  const backButton = page.locator(".topbar-grad button").first();
+  await ensureVisible(backButton, 10000, "Geri butonu bulunamadı.");
+  await backButton.click({ force: true });
+};
+
+const verifyLegalAndSupportFromSettings = async (page, fullName) => {
+  await openSettingsFromProfile(page, fullName);
+  await page.getByRole("button", { name: /Hukuki Sayfalar/i }).click();
+  await ensureVisible(page.getByRole("heading", { name: /Hukuki Sayfalar/i }), 15000, "Hukuki ekranı açılmadı.");
+  await clickTopBack(page);
+  await waitForWelcomeReady(page, { navigate: false });
+
+  await openSettingsFromProfile(page, fullName);
+  await page.getByRole("button", { name: /Yardım Merkezi/i }).click();
+  await ensureVisible(page.getByRole("heading", { name: /Yardım Merkezi/i }), 15000, "Yardım ekranı açılmadı.");
+  await clickTopBack(page);
+  await waitForWelcomeReady(page, { navigate: false });
 };
 
 const ensureEmployerFeedHasLoadCard = async (page) => {
@@ -204,12 +240,40 @@ const openDriverLocationAndList = async (page) => {
   await ensureVisible(page.getByText(/Yükler/i).first(), 30000, "Yük listesi ekranı açılmadı.");
 };
 
+const verifyDriverFeedEntryButtons = async (page) => {
+  await waitForWelcomeReady(page);
+  const driverFeedButton = page.getByRole("button", { name: driverFeedActionPattern });
+  await ensureVisible(driverFeedButton, 20000, "İş arıyorum feed butonu bulunamadı.");
+  await driverFeedButton.click();
+  await ensureVisible(page.getByRole("heading", { name: driverFeedHeadingPattern }), 25000, "Şoför feed ekranı açılmadı.");
+  await ensureVisible(page.getByRole("button", { name: /Yük Ara/i }), 10000, "Yük Ara butonu görünmüyor.");
+  await clickTopBack(page);
+  await waitForWelcomeReady(page, { navigate: false });
+};
+
 const openDriverTargetLoadDetail = async (page) => {
   const loadCard = page.locator("button", { hasText: loadType }).first();
   await ensureVisible(loadCard, 45000, "Şoför tarafında hedef ilan listede görünmedi.");
   await loadCard.click();
 
   await ensureVisible(page.getByText(/Teklif Ver/i), 25000, "Yük detayında teklif alanı açılmadı.");
+};
+
+const verifyDriverDetailActionButtons = async (page) => {
+  await ensureVisible(page.getByRole("button", { name: /Teklif Gönder/i }), 10000, "Teklif Gönder butonu yok.");
+  await ensureVisible(page.getByRole("button", { name: /İLANI RAPORLA/i }), 10000, "İlanı Raporla butonu yok.");
+
+  const hasWhatsApp = await anyVisible([
+    page.getByRole("link", { name: /WHATSAPP/i }).first(),
+    page.getByText(/WHATSAPP/i).first(),
+  ]);
+  if (!hasWhatsApp) throw new Error("WhatsApp butonu yok.");
+
+  const hasCall = await anyVisible([
+    page.getByRole("link", { name: /ARA/i }).first(),
+    page.getByText(/📞\s*ARA|^\s*ARA\s*$/i).first(),
+  ]);
+  if (!hasCall) throw new Error("Ara butonu yok.");
 };
 
 const ensureNoFatalUiError = async (page) => {
@@ -637,21 +701,24 @@ const main = async () => {
       await assertHomeButtonsForRole(employerPage, "employer");
     });
 
-    await runCheckpoint("E5", "İşveren ilan formunu feed üzerinden açabiliyor", async () => {
+    await runCheckpoint("E5", "İşveren ayarlardan Hukuki ve Yardım ekranlarına gidebiliyor", async () => {
+      await verifyLegalAndSupportFromSettings(employerPage, employer.fullName);
+    });
+
+    await runCheckpoint("E6", "İşveren ilan formunda zorunlu alan validasyonu çalışıyor", async () => {
+      await verifyEmployerFormValidation(employerPage);
+    });
+
+    await runCheckpoint("E7", "İşveren yeni yük ilanı yayınlayabiliyor", async () => {
       await postLoadAsEmployer(employerPage);
     });
 
-    await runCheckpoint("E6", "İşveren yeni yük ilanı oluşturabiliyor", async () => {
+    await runCheckpoint("E8", "Yayınlanan ilan harita/listede görünüyor", async () => {
       const card = employerPage.locator("button", { hasText: loadType }).first();
       await ensureVisible(card, 30000, "Yeni ilan listede doğrulanamadı.");
     });
 
-    await runCheckpoint("E7", "Yayınlanan ilan listede görünüyor", async () => {
-      const card = employerPage.locator("button", { hasText: loadType }).first();
-      await ensureVisible(card, 30000, "Yeni ilan listede doğrulanamadı.");
-    });
-
-    await runCheckpoint("E8", "İşveren feed ekranında ilan kartını görüyor", async () => {
+    await runCheckpoint("E9", "İşveren feed ekranında ilan kartını açabiliyor", async () => {
       await ensureEmployerFeedHasLoadCard(employerPage);
     });
 
@@ -675,48 +742,44 @@ const main = async () => {
       await assertHomeButtonsForRole(driverPage, "driver");
     });
 
-    await runCheckpoint("D5", "Şoför lokasyon ekranını açıp şehir seçebiliyor", async () => {
+    await runCheckpoint("D5", "Şoför feed ekranı açılıyor ve Yük Ara butonu görünür", async () => {
+      await verifyDriverFeedEntryButtons(driverPage);
+    });
+
+    await runCheckpoint("D6", "Şoför lokasyon ekranını açıp şehir seçebiliyor", async () => {
       await openDriverLocationAndList(driverPage);
     });
 
-    await runCheckpoint("D6", "Şoför hedef yükü listede görebiliyor", async () => {
+    await runCheckpoint("D7", "Şoför hedef yükü açabiliyor", async () => {
       const loadCard = driverPage.locator("button", { hasText: loadType }).first();
       await ensureVisible(loadCard, 30000, "Şoför hedef yükü listede göremedi.");
-    });
-
-    await runCheckpoint("D7", "Şoför yük detayını açabiliyor", async () => {
       await openDriverTargetLoadDetail(driverPage);
     });
 
-    await runCheckpoint("D8", "Şoför teklif gönderebiliyor", async () => {
-      await submitBidAsDriver(driverPage);
+    await runCheckpoint("D8", "Şoför detay aksiyon butonlarını görüyor", async () => {
+      await verifyDriverDetailActionButtons(driverPage);
     });
 
-    await runCheckpoint("D9", "Şoför feed ekranında teklif kaydını görüyor", async () => {
+    await runCheckpoint("D9", "Şoför teklif gönderebiliyor ve pending feed'de görüyor", async () => {
+      await submitBidAsDriver(driverPage);
       await verifyDriverFeedPending(driverPage);
     });
 
-    await runCheckpoint("E9", "İşveren teklif panelinde gelen teklifi görüyor", async () => {
+    await runCheckpoint("E10", "İşveren teklifi görüp kabul ediyor ve ilan assigned oluyor", async () => {
       await openEmployerBidPanel(employerPage);
       const bidRow = employerPage
         .locator("div", { hasText: `${bidPrice} ₺` })
         .filter({ has: employerPage.getByRole("button", { name: /Kabul/i }) })
         .first();
       await ensureVisible(bidRow, 60000, "Beklenen teklif satırı işverene düşmedi.");
-    });
-
-    await runCheckpoint("E10", "İşveren teklifi kabul edip ilanı assigned yapabiliyor", async () => {
       await acceptBidOnEmployerPanel(employerPage);
       await verifyEmployerFeedAssignedAndNoTimeout(employerPage);
+      await ensureNoFatalUiError(employerPage);
     });
 
     await runCheckpoint("D10", "Şoför feed ekranında kabul + yükleme tarihi görüyor", async () => {
       await verifyDriverFeedAccepted(driverPage);
       await ensureNoFatalUiError(driverPage);
-    });
-
-    await runCheckpoint("E11", "İşveren ekranında fatal hata görünmüyor", async () => {
-      await ensureNoFatalUiError(employerPage);
     });
 
     const report = writeReport("PASS");
