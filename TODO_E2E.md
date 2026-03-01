@@ -11,4 +11,4 @@ Date: 2026-02-28
 - [x] Re-run full 21-checkpoint E2E and fix all failures until pass.
 - [x] Harden E10 assigned verification: avoid brittle nested locator, poll refresh until status propagation.
 - [x] Verify no "Teklif gönderilemedi" in end-to-end run.
-- [ ] Finalize with build, commit, push, deploy verification.
+- [x] Finalize with build, commit, push, deploy verification.
