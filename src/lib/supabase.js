@@ -1,7 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 
-export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// NOTE: anon key is publishable by design for frontend clients.
+const defaultSupabaseUrl = 'https://uojbatkufexxwdosomxk.supabase.co';
+const defaultSupabaseAnonKey = 'sb_publishable_tsdP4zYiDsBaL8ihojZ6Zg_hiHEGX60';
+
+export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || defaultSupabaseUrl;
+export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || defaultSupabaseAnonKey;
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     throw new Error(
