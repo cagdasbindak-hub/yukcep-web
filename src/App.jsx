@@ -69,6 +69,7 @@ const empReviews = {
 const getER = name => empReviews[name] || empReviews["default"];
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Oturum açılışında profil rolü timeout’a dayanıklı hale getirildi; rol çözülemezse ana sayfada rol seçimi ile bloktan çıkış sağlandı." },
   { date: "2026-03-01", title: "Yük listesi sorgusu tekilleştirildi; REST fallback başarılı olduğunda çift WARN/INFO log tekrarları azaltıldı." },
   { date: "2026-03-01", title: "Canlı sayaçlarda public stats sorgusu tekilleştirildi; fallback başarılıysa gereksiz timeout WARN logları azaltıldı." },
   { date: "2026-02-28", title: "Şoför ve işveren için ayrı Feed ekranları eklendi." },
@@ -1268,22 +1269,27 @@ export default function App() {
       setUser(sessionUser);
       let fetchedProfile = null;
       try {
-        fetchedProfile = await fetchProfileById(sessionUser.id);
+        fetchedProfile = await withTimeout(
+          fetchProfileById(sessionUser.id),
+          9000,
+          "Profil sorgusu zaman aşımına uğradı (9sn)."
+        );
       } catch (error) {
         console.error("Profile fetch failed:", error);
       }
 
-      const persistedRole = normalizeRoleHint(fetchedProfile?.role);
-      if (persistedRole) {
-        setProfile(fetchedProfile);
-        writeRoleHint(persistedRole, sessionUser.id);
-        return;
+      const resolvedRole =
+        normalizeRoleHint(fetchedProfile?.role) ||
+        readRoleHint(sessionUser.id) ||
+        normalizeRoleHint(sessionUser?.user_metadata?.role) ||
+        null;
+
+      if (resolvedRole) {
+        writeRoleHint(resolvedRole, sessionUser.id);
       }
 
-      const hintedRole = readRoleHint(sessionUser.id) || normalizeRoleHint(sessionUser?.user_metadata?.role);
-      if (!hintedRole) return;
-      writeRoleHint(hintedRole, sessionUser.id);
       setProfile((prev) => ({
+        ...(fetchedProfile || {}),
         id: sessionUser.id,
         full_name:
           fetchedProfile?.full_name ||
@@ -1293,7 +1299,7 @@ export default function App() {
           "Kullanıcı",
         email: fetchedProfile?.email || prev?.email || sessionUser?.email || "",
         phone: fetchedProfile?.phone || prev?.phone || sessionUser?.user_metadata?.phone || "",
-        role: hintedRole,
+        role: resolvedRole,
       }));
     };
 
@@ -1317,7 +1323,7 @@ export default function App() {
     );
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [withTimeout]);
 
   const handleLogout = async () => {
     appendRuntimeLog("info", "LOGOUT_STARTED", "Kullanici cikis istegi gonderdi.");
@@ -1365,9 +1371,17 @@ export default function App() {
   };
 
   const handleAuthSuccess = (authUser, authProfile) => {
+    const resolvedRole =
+      normalizeRoleHint(authProfile?.role) ||
+      normalizeRoleHint(authUser?.user_metadata?.role) ||
+      null;
     setUser(authUser);
-    setProfile(authProfile);
-    writeRoleHint(authProfile?.role, authUser?.id);
+    setProfile({
+      ...(authProfile || {}),
+      id: authUser?.id,
+      role: resolvedRole,
+    });
+    writeRoleHint(resolvedRole, authUser?.id);
     setScreen("welcome");
     showToast("✅ Giriş başarılı!");
   };
@@ -1564,6 +1578,7 @@ export default function App() {
         );
         const mappedLoads = data.map((l) => mapDbToUi(l));
         setRealLoads(mappedLoads);
+        setIsLoading(false);
         return mappedLoads;
       } catch (error) {
         supabaseError = error;
@@ -1952,8 +1967,8 @@ export default function App() {
   const statLoads = useAnimatedCount(publicStats.activeLoads);
   const statDrivers = useAnimatedCount(publicStats.activeDrivers);
   const statCities = useAnimatedCount(publicStats.activeCities);
-  const showDriverHomeAction = !user;
-  const showEmployerHomeAction = !user;
+  const showDriverHomeAction = !user || (Boolean(user) && !activeRole);
+  const showEmployerHomeAction = !user || (Boolean(user) && !activeRole);
 
   return (
     <div className="app-shell min-h-screen flex items-center justify-center p-3 sm:p-5">
@@ -2164,7 +2179,13 @@ export default function App() {
                 <div className="space-y-3 mb-6">
                   {showDriverHomeAction && (
                     <button
-                      onClick={() => nav("location")}
+                      onClick={() => {
+                        if (user && !activeRole) {
+                          handleSwitchRole("driver");
+                          return;
+                        }
+                        nav("location");
+                      }}
                       className="group w-full py-6 px-5 rounded-3xl text-white text-xl font-black active:scale-[0.98] transition-all relative overflow-hidden shadow-lg hover:shadow-blue-500/20 hover-scale"
                       style={{ background: "linear-gradient(180deg,#60a5fa 0%,#2563eb 100%)", boxShadow: "0 10px 20px -5px rgba(37,99,235,0.4)" }}
                     >
@@ -2178,7 +2199,13 @@ export default function App() {
                   )}
                   {showEmployerHomeAction && (
                     <button
-                      onClick={() => nav("employer")}
+                      onClick={() => {
+                        if (user && !activeRole) {
+                          handleSwitchRole("employer");
+                          return;
+                        }
+                        nav("employer");
+                      }}
                       className="group w-full py-5 px-5 rounded-3xl text-white text-lg font-black active:scale-[0.98] transition-all relative overflow-hidden shadow-lg hover:shadow-orange-500/20 hover-scale"
                       style={{ background: "linear-gradient(180deg,#fb923c 0%,#ea580c 100%)", boxShadow: "0 8px 16px -5px rgba(234,88,12,0.3)" }}
                     >
