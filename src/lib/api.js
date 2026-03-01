@@ -1282,3 +1282,38 @@ export const createAbuseReportApi = async ({ loadId, reporterId, reason, details
     .single();
   return unwrap(res, "Failed to create abuse report");
 };
+
+export const fetchFeedbackItemsApi = async ({ limit = 40 } = {}) => {
+  const safeLimit = Math.max(5, Math.min(100, Number(limit) || 40));
+  const res = await supabase
+    .from("feedback_items")
+    .select("id, user_id, author_name, content, codex_comment, status_tag, moderation_status, created_at, updated_at")
+    .order("created_at", { ascending: false })
+    .limit(safeLimit);
+  return unwrap(res, "Failed to fetch feedback items");
+};
+
+export const createFeedbackItemApi = async ({
+  userId,
+  authorName,
+  content,
+  codexComment,
+  statusTag,
+  moderationStatus,
+}) => {
+  const res = await supabase
+    .from("feedback_items")
+    .insert([
+      {
+        user_id: userId,
+        author_name: String(authorName || "Kullanıcı").trim(),
+        content: String(content || "").trim(),
+        codex_comment: String(codexComment || "").trim(),
+        status_tag: String(statusTag || "yapilacak"),
+        moderation_status: String(moderationStatus || "published"),
+      },
+    ])
+    .select("id, user_id, author_name, content, codex_comment, status_tag, moderation_status, created_at, updated_at")
+    .single();
+  return unwrap(res, "Failed to create feedback item");
+};

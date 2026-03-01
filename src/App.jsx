@@ -5,12 +5,14 @@ import {
   createAbuseReportApi,
   createBidApi,
   createBidViaRestApi,
+  createFeedbackItemApi,
   createLoadApi,
   createLoadViaRestApi,
   createNotificationApi,
   ensureProfileApi,
   fetchDriverFeedApi,
   fetchDriverFeedViaRestApi,
+  fetchFeedbackItemsApi,
   fetchBidsForLoadApi,
   fetchBidsForLoadViaRestApi,
   fetchEmployerFeedApi,
@@ -94,6 +96,8 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-01", title: "Son 10 Güncelleme üstüne herkese açık Feedback Panosu eklendi: kullanıcı önerisi + otomatik Codex yorumu + durum tag." },
+  { date: "2026-03-01", title: "Feedback moderasyonu otomatikleştirildi; geri bildirim dışı yorumlar filtrelenip Kötü Fikir etiketiyle işaretleniyor." },
   { date: "2026-03-01", title: "Launch hardening: CI (lint/build/smoke/a11y), post-deploy smoke ve health-check otomasyonu eklendi." },
   { date: "2026-03-01", title: "İlanı Raporla akışı eklendi; aynı kullanıcı/ilan için 5 dakika anti-spam cooldown aktif." },
   { date: "2026-03-01", title: "İşveren Feed'e kanban hızlı bakış kartları (bekleyen/kabul/red) eklendi." },
@@ -122,13 +126,16 @@ const RELEASE_UPDATES_SEED = [
 const LOG_STORAGE_KEY = "yukcep_runtime_logs_v1";
 const PUBLIC_STATS_CACHE_KEY = "yukcep_public_stats_cache_v1";
 const RELEASE_UPDATES_KEY = "yukcep_release_updates_v1";
+const FEEDBACK_STORAGE_KEY = "yukcep_feedback_items_v1";
 const ROLE_HINT_KEY = "yukcep_profile_role_hint_v1";
 const SETTINGS_KEY = "yukcep_user_settings_v1";
 const REMOTE_LOG_FLUSH_SIZE = 6;
 const REMOTE_LOG_FLUSH_DELAY_MS = 2200;
 const PUBLIC_STATS_FETCH_COOLDOWN_MS = 2500;
 const LOADS_FETCH_COOLDOWN_MS = 1800;
+const FEEDBACK_FETCH_COOLDOWN_MS = 2400;
 const REPORT_RATE_LIMIT_MS = 5 * 60 * 1000;
+const FEEDBACK_RATE_LIMIT_MS = 45 * 1000;
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "2026.03.01";
 
 const DEFAULT_USER_SETTINGS = {
@@ -214,6 +221,131 @@ const sanitizeReleaseUpdates = (items = []) => {
     });
   });
   return normalized.slice(0, 10);
+};
+
+const sanitizeFeedbackText = (value = "") =>
+  String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, "[email]")
+    .replace(/\+?\d[\d\s().-]{8,}\d/g, "[phone]")
+    .replace(/\b(?:ghp|github_pat)_[A-Za-z0-9_]+\b/g, "[token]")
+    .trim()
+    .slice(0, 280);
+
+const sanitizeFeedbackItems = (items = []) =>
+  (Array.isArray(items) ? items : [])
+    .map((item) => ({
+      id: Number(item?.id) || Number(`${Date.now()}${Math.floor(Math.random() * 999)}`),
+      user_id: item?.user_id || null,
+      author_name: String(item?.author_name || "Kullanıcı").trim() || "Kullanıcı",
+      content: sanitizeFeedbackText(item?.content || ""),
+      codex_comment: sanitizeFeedbackText(item?.codex_comment || ""),
+      status_tag: ["yapildi", "yapilacak", "kotu_fikir"].includes(item?.status_tag) ? item.status_tag : "yapilacak",
+      moderation_status: item?.moderation_status === "filtered" ? "filtered" : "published",
+      created_at: item?.created_at || new Date().toISOString(),
+      updated_at: item?.updated_at || item?.created_at || new Date().toISOString(),
+    }))
+    .filter((item) => item.content.length >= 6)
+    .slice(0, 80);
+
+const evaluateFeedbackSubmission = ({ content, releaseUpdates }) => {
+  const text = sanitizeFeedbackText(content);
+  if (!text || text.length < 8) {
+    return {
+      moderationStatus: "filtered",
+      statusTag: "kotu_fikir",
+      codexComment: "Bu mesaj net bir geri bildirim değil. Daha açık bir öneri veya hata tanımı yaz.",
+    };
+  }
+
+  const lower = text.toLocaleLowerCase("tr-TR");
+  const riskyPattern = /(sifre|password|token|admin yetkisi|dogrulamayi kaldir|guvenlik.*kapat|hack)/i;
+  if (riskyPattern.test(lower)) {
+    return {
+      moderationStatus: "filtered",
+      statusTag: "kotu_fikir",
+      codexComment: "Bu öneri güvenlik riskli olduğu için uygulanamaz.",
+    };
+  }
+
+  const offTopicPattern = /(bahis|casino|kumar|kripto sinyal|reklam verelim|telegram grubu|takip et kazan)/i;
+  if (offTopicPattern.test(lower)) {
+    return {
+      moderationStatus: "filtered",
+      statusTag: "kotu_fikir",
+      codexComment: "Bu yorum ürün geri bildirimi kapsamına girmiyor.",
+    };
+  }
+
+  const hasTooManyLinks = (text.match(/https?:\/\//gi) || []).length > 1;
+  if (hasTooManyLinks) {
+    return {
+      moderationStatus: "filtered",
+      statusTag: "kotu_fikir",
+      codexComment: "Aşırı link içeren yorumlar otomatik filtrelenir. Kısa ve net geri bildirim paylaş.",
+    };
+  }
+
+  const feedbackSignalPattern = /(hata|bug|calismiyor|çalışmıyor|duzelt|düzelt|iyilestir|iyileştir|ekle|eksik|performans|yavas|yavaş|ui|ux|tasarim|tasarım|bildirim|rol|feed|ilan|teklif|harita|filtre|kayit|kayıt|giris|giriş|buton)/i;
+  const releaseText = sanitizeReleaseUpdates(releaseUpdates)
+    .map((item) => String(item?.title || "").toLocaleLowerCase("tr-TR"))
+    .join(" ");
+  const words = lower.split(/\s+/).filter((w) => w.length > 4);
+  const overlapCount = words.filter((w, idx) => words.indexOf(w) === idx && releaseText.includes(w)).length;
+
+  if (/(duzeldi|düzeldi|cozuldu|çözüldü|yapildi|yapıldı)/i.test(lower) || overlapCount >= 2) {
+    return {
+      moderationStatus: "published",
+      statusTag: "yapildi",
+      codexComment: "İyi geri bildirim. Bu konu son güncellemelerde ele alınmış görünüyor.",
+    };
+  }
+
+  if (!feedbackSignalPattern.test(lower)) {
+    return {
+      moderationStatus: "filtered",
+      statusTag: "kotu_fikir",
+      codexComment: "Bu içerik net bir öneri/hata içermiyor. Daha spesifik geri bildirim yaz.",
+    };
+  }
+
+  return {
+    moderationStatus: "published",
+    statusTag: "yapilacak",
+    codexComment: "İyi geri bildirim, uygulanabilir. Plan listesine alındı.",
+  };
+};
+
+const getFeedbackStatusUi = (statusTag) => {
+  if (statusTag === "yapildi") {
+    return {
+      label: "Yaptım",
+      className: "bg-emerald-500/15 text-emerald-300 border border-emerald-500/40",
+    };
+  }
+  if (statusTag === "kotu_fikir") {
+    return {
+      label: "Kötü Fikir",
+      className: "bg-red-500/15 text-red-300 border border-red-500/40",
+    };
+  }
+  return {
+    label: "Yapacağım",
+    className: "bg-cyan-500/15 text-cyan-300 border border-cyan-500/40",
+  };
+};
+
+const isFeedbackTableMissingError = (message = "") =>
+  /(feedback_items|relation .*feedback_items|does not exist|bulunamadi|not found)/i.test(String(message || ""));
+
+const parseFeedbackRuntimeDetails = (details = "") => {
+  try {
+    const parsed = JSON.parse(String(details || "{}"));
+    if (parsed?.type !== "feedback_item") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 };
 
 const getSupabaseStorageKey = () => {
@@ -423,6 +555,11 @@ export default function App() {
   const [runtimeLogs, setRuntimeLogs] = useState([]);
   const [showRuntimeLogs, setShowRuntimeLogs] = useState(false);
   const [releaseUpdates, setReleaseUpdates] = useState(RELEASE_UPDATES_SEED);
+  const [feedbackItems, setFeedbackItems] = useState([]);
+  const [feedbackInput, setFeedbackInput] = useState("");
+  const [isFeedbackLoading, setIsFeedbackLoading] = useState(false);
+  const [isPostingFeedback, setIsPostingFeedback] = useState(false);
+  const [feedbackError, setFeedbackError] = useState("");
   const [roleSwitchPopup, setRoleSwitchPopup] = useState(null);
   const [userSettings, setUserSettings] = useState(DEFAULT_USER_SETTINGS);
   const remoteLogQueueRef = useRef([]);
@@ -437,6 +574,8 @@ export default function App() {
   const loadsFetchPromiseRef = useRef(null);
   const loadsLastFetchAtRef = useRef(0);
   const loadsFetchKeyRef = useRef("");
+  const feedbackFetchPromiseRef = useRef(null);
+  const feedbackLastFetchAtRef = useRef(0);
 
   useEffect(() => {
     latestRealLoadsRef.current = realLoads;
@@ -594,6 +733,17 @@ export default function App() {
     return sanitized;
   }, []);
 
+  const persistFeedbackItems = useCallback((nextItems) => {
+    const sanitized = sanitizeFeedbackItems(nextItems);
+    setFeedbackItems(sanitized);
+    try {
+      localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(sanitized));
+    } catch {
+      // ignore cache write failures
+    }
+    return sanitized;
+  }, []);
+
   const applyLocalStatsFallback = useCallback((candidateLoads, options = {}) => {
     const localDerived = deriveStatsFromUiLoads(candidateLoads);
     setPublicStats((prev) => {
@@ -701,6 +851,19 @@ export default function App() {
       persistReleaseUpdates(RELEASE_UPDATES_SEED);
     }
   }, [persistReleaseUpdates]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(FEEDBACK_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setFeedbackItems(sanitizeFeedbackItems(parsed));
+      }
+    } catch {
+      // ignore malformed feedback cache
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -1446,6 +1609,160 @@ export default function App() {
     withTimeout,
   ]);
 
+  const handleSubmitFeedback = useCallback(async () => {
+    const normalizedInput = sanitizeFeedbackText(feedbackInput);
+    if (!normalizedInput) {
+      showToast("Lütfen bir feedback yaz.", "error");
+      return;
+    }
+    if (!user?.id) {
+      showToast("Feedback bırakmak için giriş yapmalısın.", "error");
+      nav("auth");
+      return;
+    }
+    if (isPostingFeedback) return;
+
+    const rateKey = `yukcep_feedback_rate_v1:${user.id}`;
+    const nowTs = Date.now();
+    try {
+      const previousTs = Number(localStorage.getItem(rateKey) || "0");
+      if (previousTs && nowTs - previousTs < FEEDBACK_RATE_LIMIT_MS) {
+        const waitSec = Math.max(1, Math.ceil((FEEDBACK_RATE_LIMIT_MS - (nowTs - previousTs)) / 1000));
+        showToast(`Yeni feedback için ${waitSec} sn bekleyin.`, "error");
+        return;
+      }
+    } catch {
+      // ignore local rate read failures
+    }
+
+    const triage = evaluateFeedbackSubmission({
+      content: normalizedInput,
+      releaseUpdates,
+    });
+
+    setIsPostingFeedback(true);
+    try {
+      const created = await withTimeout(
+        createFeedbackItemApi({
+          userId: user.id,
+          authorName: profile?.full_name || user?.email?.split("@")[0] || "Kullanıcı",
+          content: normalizedInput,
+          codexComment: triage.codexComment,
+          statusTag: triage.statusTag,
+          moderationStatus: triage.moderationStatus,
+        }),
+        10000,
+        "Feedback gönderimi zaman aşımına uğradı (10sn)."
+      );
+
+      setFeedbackItems((prev) => {
+        const merged = sanitizeFeedbackItems([created, ...prev]);
+        try {
+          localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(merged));
+        } catch {
+          // ignore storage failures
+        }
+        return merged;
+      });
+      setFeedbackInput("");
+      setFeedbackError("");
+      try {
+        localStorage.setItem(rateKey, String(nowTs));
+      } catch {
+        // ignore storage write failures
+      }
+
+      appendRuntimeLog(
+        "info",
+        "FEEDBACK_CREATE_OK",
+        `tag=${triage.statusTag} moderation=${triage.moderationStatus}`
+      );
+      if (triage.statusTag === "kotu_fikir") {
+        showToast("Feedback kaydedildi ve filtrelendi.");
+      } else if (triage.statusTag === "yapildi") {
+        showToast("Feedback için durum: Yaptım ✅");
+      } else {
+        showToast("Feedback alındı. Durum: Yapacağım 🛠️");
+      }
+    } catch (error) {
+      const message = error?.message || "Feedback gönderilemedi.";
+      if (isFeedbackTableMissingError(message)) {
+        try {
+          const fallbackPayload = {
+            type: "feedback_item",
+            user_id: user.id,
+            author_name: profile?.full_name || user?.email?.split("@")[0] || "Kullanıcı",
+            content: normalizedInput,
+            codex_comment: triage.codexComment,
+            status_tag: triage.statusTag,
+            moderation_status: triage.moderationStatus,
+          };
+
+          await withTimeout(
+            insertRuntimeLogsApi({
+              logs: [
+                {
+                  client_event_at: new Date().toISOString(),
+                  level: "info",
+                  event_code: "FEEDBACK_ITEM",
+                  details: JSON.stringify(fallbackPayload),
+                  session_id: runtimeSessionIdRef.current,
+                  user_id: user.id,
+                  screen: screen || null,
+                  app_version: APP_VERSION,
+                },
+              ],
+            }),
+            9000,
+            "Feedback fallback insert zaman aşımına uğradı (9sn)."
+          );
+
+          setFeedbackItems((prev) => {
+            const fallbackRow = {
+              id: `rt-local-${Date.now()}`,
+              ...fallbackPayload,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            };
+            const merged = sanitizeFeedbackItems([fallbackRow, ...prev]);
+            try {
+              localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(merged));
+            } catch {
+              // ignore storage failures
+            }
+            return merged;
+          });
+          setFeedbackInput("");
+          setFeedbackError("Feedback tablosu henüz yok. Geçici log fallback ile kaydedildi.");
+          appendRuntimeLog("warn", "FEEDBACK_CREATE_FALLBACK", "feedback_items eksik, runtime_logs fallback kullanıldı.");
+          showToast("Feedback alındı (geçici fallback).");
+          return;
+        } catch (fallbackError) {
+          appendRuntimeLog("error", "FEEDBACK_CREATE_FALLBACK_FAIL", fallbackError?.message || "Feedback fallback failed");
+        }
+      }
+
+      appendRuntimeLog("error", "FEEDBACK_CREATE_FAIL", message);
+      setFeedbackError(message);
+      showToast("Feedback gönderilemedi.", "error");
+      pushPersistentError("FEEDBACK", message);
+    } finally {
+      setIsPostingFeedback(false);
+    }
+  }, [
+    appendRuntimeLog,
+    feedbackInput,
+    isPostingFeedback,
+    nav,
+    profile?.full_name,
+    pushPersistentError,
+    releaseUpdates,
+    screen,
+    user?.email,
+    user?.id,
+    withTimeout,
+  ]);
+
   useEffect(() => {
     if (chatEndRef.current) chatEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
@@ -1736,6 +2053,90 @@ export default function App() {
     return publicStatsFetchPromiseRef.current;
   }, [appendRuntimeLog, applyLocalStatsFallback, persistPublicStats, pushPersistentError, withTimeout]);
 
+  const fetchFeedback = useCallback((options = {}) => {
+    const force = options?.force === true;
+    const now = Date.now();
+
+    if (!force && feedbackFetchPromiseRef.current) {
+      return feedbackFetchPromiseRef.current;
+    }
+    if (!force && now - feedbackLastFetchAtRef.current < FEEDBACK_FETCH_COOLDOWN_MS) {
+      return Promise.resolve(null);
+    }
+
+    const request = (async () => {
+      feedbackLastFetchAtRef.current = Date.now();
+      setIsFeedbackLoading(true);
+      setFeedbackError("");
+      try {
+        const rows = await withTimeout(
+          fetchFeedbackItemsApi({ limit: 50 }),
+          9000,
+          "Feedback listesi zaman aşımına uğradı (9sn)."
+        );
+        persistFeedbackItems(rows);
+        return rows;
+      } catch (error) {
+        const message = error?.message || "Feedback fetch failed";
+        appendRuntimeLog("warn", "FEEDBACK_FETCH_FAIL", message);
+
+        if (isFeedbackTableMissingError(message)) {
+          try {
+            const runtimeRes = await withTimeout(
+              supabase
+                .from("runtime_logs")
+                .select("id, details, created_at")
+                .eq("event_code", "FEEDBACK_ITEM")
+                .order("created_at", { ascending: false })
+                .limit(50),
+              8000,
+              "Feedback fallback log sorgusu zaman aşımına uğradı (8sn)."
+            );
+            if (runtimeRes?.error) {
+              throw new Error(runtimeRes.error.message || "Runtime feedback fallback failed");
+            }
+            const fallbackRows = (runtimeRes?.data || [])
+              .map((row) => {
+                const parsed = parseFeedbackRuntimeDetails(row?.details || "");
+                if (!parsed) return null;
+                return {
+                  id: `rt-${row.id}`,
+                  user_id: parsed.user_id || null,
+                  author_name: parsed.author_name || "Kullanıcı",
+                  content: parsed.content || "",
+                  codex_comment: parsed.codex_comment || "",
+                  status_tag: parsed.status_tag || "yapilacak",
+                  moderation_status: parsed.moderation_status || "published",
+                  created_at: row.created_at,
+                  updated_at: row.created_at,
+                };
+              })
+              .filter(Boolean);
+
+            if (fallbackRows.length > 0) {
+              persistFeedbackItems(fallbackRows);
+            }
+            setFeedbackError("Feedback tablosu henüz açılmadı. Geçici log fallback gösteriliyor.");
+            return fallbackRows;
+          } catch (fallbackError) {
+            appendRuntimeLog("warn", "FEEDBACK_FALLBACK_FAIL", fallbackError?.message || "Feedback fallback failed");
+          }
+        }
+
+        setFeedbackError(message || "Feedback listesi yüklenemedi.");
+        return null;
+      } finally {
+        setIsFeedbackLoading(false);
+      }
+    })();
+
+    feedbackFetchPromiseRef.current = request.finally(() => {
+      feedbackFetchPromiseRef.current = null;
+    });
+
+    return feedbackFetchPromiseRef.current;
+  }, [appendRuntimeLog, persistFeedbackItems, withTimeout]);
+
   const fetchLoads = useCallback((options = {}) => {
     const force = options?.force === true;
     const now = Date.now();
@@ -1818,6 +2219,10 @@ export default function App() {
   }, [fetchPublicStats]);
 
   useEffect(() => {
+    fetchFeedback();
+  }, [fetchFeedback]);
+
+  useEffect(() => {
     if (!user) {
       setDriverFeedItems([]);
       setEmployerFeedItems([]);
@@ -1850,6 +2255,23 @@ export default function App() {
       supabase.removeChannel(channel);
     };
   }, [fetchLoads, fetchPublicStats]);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel("public:feedback-live")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "feedback_items" },
+        () => {
+          fetchFeedback({ force: true });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [fetchFeedback]);
 
   // Form Validation
   const validateForm = () => {
@@ -2209,6 +2631,7 @@ export default function App() {
   const statLoads = useAnimatedCount(publicStats.activeLoads);
   const statDrivers = useAnimatedCount(publicStats.activeDrivers);
   const statCities = useAnimatedCount(publicStats.activeCities);
+  const feedbackPreviewItems = feedbackItems.slice(0, 20);
   const showDriverHomeAction = !user || (Boolean(user) && !activeRole);
   const showEmployerHomeAction = !user || (Boolean(user) && !activeRole);
 
@@ -2525,6 +2948,99 @@ export default function App() {
 
                 {/* ─── SPACER ─── */}
                 <div className="flex-1" />
+
+                {/* ─── FEEDBACK BOARD ─── */}
+                <div className="mb-3 p-4 rounded-2xl bg-slate-800/40 border border-slate-700/30">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-slate-200 text-sm font-black">💬 Feedback Panosu</p>
+                    <span className="text-[10px] text-slate-500 font-bold">HERKESE AÇIK</span>
+                  </div>
+                  <p className="text-slate-400 text-[11px] leading-relaxed mb-3">
+                    1. kolon kullanıcı önerisi, 2. kolon otomatik Codex yorumu, 3. kolon otomatik durum etiketidir.
+                  </p>
+
+                  <div className="space-y-2 mb-3">
+                    <textarea
+                      value={feedbackInput}
+                      onChange={(e) => setFeedbackInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                          e.preventDefault();
+                          handleSubmitFeedback();
+                        }
+                      }}
+                      disabled={!user || isPostingFeedback}
+                      placeholder={user ? "Önerini veya bulduğun hatayı yaz... (Ctrl+Enter gönder)" : "Feedback bırakmak için giriş yapmalısın."}
+                      className="w-full min-h-[74px] py-2.5 px-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm placeholder-slate-500 focus:outline-none focus:border-cyan-500 disabled:opacity-60"
+                      maxLength={280}
+                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[10px] text-slate-500 font-semibold">
+                        {feedbackInput.length}/280
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleSubmitFeedback}
+                        disabled={!user || isPostingFeedback}
+                        className={`px-3 py-2 rounded-lg text-xs font-black border ${
+                          !user || isPostingFeedback
+                            ? "bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed"
+                            : "bg-cyan-500/15 text-cyan-200 border-cyan-500/40 hover:bg-cyan-500/25"
+                        }`}
+                      >
+                        {isPostingFeedback ? "GÖNDERİLİYOR..." : "FEEDBACK BIRAK"}
+                      </button>
+                    </div>
+                    {feedbackError && (
+                      <p className="text-[11px] text-red-300 font-bold">{feedbackError}</p>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-12 gap-2 mb-2 px-1">
+                    <p className="col-span-5 text-[10px] font-black text-slate-400 uppercase tracking-wide">Kullanıcı Feedback</p>
+                    <p className="col-span-5 text-[10px] font-black text-slate-400 uppercase tracking-wide">Codex Yorumu</p>
+                    <p className="col-span-2 text-[10px] font-black text-slate-400 uppercase tracking-wide text-center">Durum</p>
+                  </div>
+                  <div className="max-h-52 overflow-y-auto pr-1 space-y-2">
+                    {isFeedbackLoading && feedbackPreviewItems.length === 0 ? (
+                      <p className="text-slate-500 text-xs">Feedback listesi yükleniyor...</p>
+                    ) : feedbackPreviewItems.length === 0 ? (
+                      <p className="text-slate-500 text-xs">Henüz feedback yok.</p>
+                    ) : (
+                      feedbackPreviewItems.map((item) => {
+                        const statusUi = getFeedbackStatusUi(item.status_tag);
+                        return (
+                          <div
+                            key={`feedback-${item.id}`}
+                            className={`grid grid-cols-12 gap-2 p-2 rounded-lg border ${
+                              item.moderation_status === "filtered"
+                                ? "bg-slate-900/30 border-red-500/20"
+                                : "bg-slate-900/40 border-slate-700/30"
+                            }`}
+                          >
+                            <div className="col-span-5">
+                              <p className="text-slate-100 text-[11px] font-semibold leading-snug">{item.content}</p>
+                              <p className="text-slate-500 text-[10px] mt-1">
+                                {item.author_name} · {new Date(item.created_at).toLocaleString("tr-TR")}
+                              </p>
+                            </div>
+                            <div className="col-span-5">
+                              <p className="text-cyan-100 text-[11px] font-semibold leading-snug">{item.codex_comment}</p>
+                              {item.moderation_status === "filtered" && (
+                                <p className="text-red-300 text-[10px] mt-1 font-bold">Filtrelendi</p>
+                              )}
+                            </div>
+                            <div className="col-span-2 flex items-center justify-center">
+                              <span className={`px-2 py-1 rounded-md text-[10px] font-black text-center ${statusUi.className}`}>
+                                {statusUi.label}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
 
                 {/* ─── RELEASE LOG ─── */}
                 <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/30">
