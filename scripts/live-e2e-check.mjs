@@ -235,7 +235,15 @@ const openDriverLocationAndList = async (page) => {
   await ensureVisible(page.getByRole("heading", { name: /Neredesiniz/i }), 25000, "Lokasyon ekranı açılmadı.");
 
   await page.getByPlaceholder(/Sehir ara/i).fill(fromCity);
-  await page.getByRole("button", { name: new RegExp(`^${fromCity}$`, "i") }).click();
+  const cityButton = page.getByRole("button", { name: new RegExp(`^${fromCity}(\\s+\\d+)?$`, "i") }).first();
+  const hasCityButton = await cityButton.isVisible().catch(() => false);
+  if (hasCityButton) {
+    await cityButton.click();
+  } else {
+    const fallbackCityButton = page.locator("button", { hasText: fromCity }).first();
+    await ensureVisible(fallbackCityButton, 30000, `Lokasyon listesinde ${fromCity} bulunamadı.`);
+    await fallbackCityButton.click();
+  }
 
   await ensureVisible(page.getByText(/Yükler/i).first(), 30000, "Yük listesi ekranı açılmadı.");
 };
@@ -472,11 +480,11 @@ const verifyDriverFeedAccepted = async (page) => {
   await ensureVisible(card.getByText(/Kabul Edildi/i), 45000, "Şoför feed içinde kabul durumu görünmüyor.");
 
   const text = (await card.textContent()) || "";
-  if (!/Yükleme Tarihi/i.test(text)) {
-    throw new Error("Şoför feed kartında yükleme tarihi alanı bulunamadı.");
+  if (!/Yükleme Planı|Yükleme Tarihi/i.test(text)) {
+    throw new Error("Şoför feed kartında yükleme planı alanı bulunamadı.");
   }
-  if (/Yükleme Tarihi\s*Belirsiz/i.test(text)) {
-    throw new Error("Şoför feed kartında yükleme tarihi belirsiz görünüyor.");
+  if (/(Yükleme Planı|Yükleme Tarihi)\s*Belirsiz/i.test(text)) {
+    throw new Error("Şoför feed kartında yükleme planı belirsiz görünüyor.");
   }
 };
 

@@ -9,6 +9,20 @@ const unwrap = (result, context) => {
   return result.data;
 };
 
+const isMissingColumnError = (errorOrMessage, columnName) => {
+  const message = String(
+    errorOrMessage?.message ||
+      errorOrMessage?.details ||
+      errorOrMessage?.hint ||
+      errorOrMessage?.error_description ||
+      errorOrMessage ||
+      ""
+  ).toLowerCase();
+  const key = String(columnName || "").toLowerCase();
+  if (!key) return false;
+  return message.includes(key) && (message.includes("does not exist") || message.includes("column"));
+};
+
 const normalizeCityKey = (value = "") =>
   value
     .toString()
@@ -553,18 +567,26 @@ export const createNotificationViaRestApi = async ({
 };
 
 export const fetchLoadsApi = async ({ filterFrom, filterTo, filterTrailer }) => {
-  let query = supabase
-    .from("loads")
-    .select(
-      "id, employer_id, origin_city, destination_city, distance_km, load_type, trailer_type, weight_kg, price, currency, kdv_included, status, pickup_date, created_at, is_urgent, is_fleet, truck_count"
-    )
-    .order("created_at", { ascending: false })
-    .limit(300);
+  const selectWithPickupTime =
+    "id, employer_id, origin_city, destination_city, distance_km, load_type, trailer_type, weight_kg, price, currency, kdv_included, status, pickup_date, pickup_time, created_at, is_urgent, is_fleet, truck_count";
+  const selectWithoutPickupTime =
+    "id, employer_id, origin_city, destination_city, distance_km, load_type, trailer_type, weight_kg, price, currency, kdv_included, status, pickup_date, created_at, is_urgent, is_fleet, truck_count";
 
-  // Trailer tipi net bir enum oldugu icin DB tarafinda filtrelenebilir.
-  if (filterTrailer) query = query.eq("trailer_type", filterTrailer);
+  const buildLoadsQuery = (projection) => {
+    let query = supabase
+      .from("loads")
+      .select(projection)
+      .order("created_at", { ascending: false })
+      .limit(300);
+    if (filterTrailer) query = query.eq("trailer_type", filterTrailer);
+    return query;
+  };
 
-  const res = await query;
+  let res = await buildLoadsQuery(selectWithPickupTime);
+  if (res.error && isMissingColumnError(res.error, "pickup_time")) {
+    res = await buildLoadsQuery(selectWithoutPickupTime);
+  }
+
   const todayDateKey = getTodayDateKey();
   const data = unwrap(res, "Failed to fetch loads").filter(
     (load) => isActiveLoadStatus(load.status) && isTodayOrFuturePickupDate(load.pickup_date, todayDateKey)
@@ -617,22 +639,35 @@ export const fetchLoadsViaRestApi = async ({
     Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
   };
 
-  const query = new URLSearchParams();
-  query.set(
-    "select",
-    "id,employer_id,origin_city,destination_city,distance_km,load_type,trailer_type,weight_kg,price,currency,kdv_included,status,pickup_date,created_at,is_urgent,is_fleet,truck_count"
-  );
-  query.set("order", "created_at.desc");
-  query.set("limit", "300");
-  if (filterTrailer) {
-    query.set("trailer_type", `eq.${filterTrailer}`);
-  }
+  const buildLoadQuery = (includePickupTime) => {
+    const query = new URLSearchParams();
+    query.set(
+      "select",
+      includePickupTime
+        ? "id,employer_id,origin_city,destination_city,distance_km,load_type,trailer_type,weight_kg,price,currency,kdv_included,status,pickup_date,pickup_time,created_at,is_urgent,is_fleet,truck_count"
+        : "id,employer_id,origin_city,destination_city,distance_km,load_type,trailer_type,weight_kg,price,currency,kdv_included,status,pickup_date,created_at,is_urgent,is_fleet,truck_count"
+    );
+    query.set("order", "created_at.desc");
+    query.set("limit", "300");
+    if (filterTrailer) query.set("trailer_type", `eq.${filterTrailer}`);
+    return `${SUPABASE_URL}/rest/v1/loads?${query.toString()}`;
+  };
 
-  const loadRows = await fetchJsonWithTimeout({
-    url: `${SUPABASE_URL}/rest/v1/loads?${query.toString()}`,
-    headers,
-    timeoutMs,
-  });
+  let loadRows = null;
+  try {
+    loadRows = await fetchJsonWithTimeout({
+      url: buildLoadQuery(true),
+      headers,
+      timeoutMs,
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error, "pickup_time")) throw error;
+    loadRows = await fetchJsonWithTimeout({
+      url: buildLoadQuery(false),
+      headers,
+      timeoutMs,
+    });
+  }
 
   const todayDateKey = getTodayDateKey();
   const activeLoads = Array.isArray(loadRows)
@@ -684,7 +719,7 @@ export const createLoadApi = async (loadData) => {
   let changed = false;
 
   // Backward compatibility for older schemas.
-  ["kdv_included", "status", "currency"].forEach((field) => {
+  ["kdv_included", "status", "currency", "pickup_time"].forEach((field) => {
     if (message.includes(field)) {
       delete fallbackData[field];
       changed = true;
@@ -763,7 +798,7 @@ export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 
     const fallbackData = { ...loadData };
     let changed = false;
 
-    ["kdv_included", "status", "currency"].forEach((field) => {
+    ["kdv_included", "status", "currency", "pickup_time"].forEach((field) => {
       if (message.includes(field)) {
         delete fallbackData[field];
         changed = true;
@@ -932,10 +967,20 @@ export const fetchDriverFeedApi = async ({ userId }) => {
   if (!bids.length) return [];
 
   const loadIds = [...new Set(bids.map((row) => row.load_id).filter(Boolean))];
-  const loadsRes = await supabase
+  const selectWithPickupTime =
+    "id, employer_id, origin_city, destination_city, pickup_date, pickup_time, load_type, trailer_type, price, currency, status, created_at";
+  const selectWithoutPickupTime =
+    "id, employer_id, origin_city, destination_city, pickup_date, load_type, trailer_type, price, currency, status, created_at";
+  let loadsRes = await supabase
     .from("loads")
-    .select("id, employer_id, origin_city, destination_city, pickup_date, load_type, trailer_type, price, currency, status, created_at")
+    .select(selectWithPickupTime)
     .in("id", loadIds);
+  if (loadsRes.error && isMissingColumnError(loadsRes.error, "pickup_time")) {
+    loadsRes = await supabase
+      .from("loads")
+      .select(selectWithoutPickupTime)
+      .in("id", loadIds);
+  }
   const allLoads = unwrap(loadsRes, "Failed to fetch driver feed loads");
   const todayDateKey = getTodayDateKey();
   const loads = allLoads.filter((row) => isTodayOrFuturePickupDate(row.pickup_date, todayDateKey));
@@ -967,6 +1012,7 @@ export const fetchDriverFeedApi = async ({ userId }) => {
       origin_city: load.origin_city || "-",
       destination_city: load.destination_city || "-",
       pickup_date: load.pickup_date || null,
+      pickup_time: load.pickup_time || null,
       load_type: load.load_type || "-",
       trailer_type: load.trailer_type || "-",
       load_price: load.price || 0,
@@ -1014,13 +1060,28 @@ export const fetchDriverFeedViaRestApi = async ({ userId, accessToken, timeoutMs
   const loadIds = [...new Set(bids.map((row) => row.load_id).filter(Boolean))];
   if (!loadIds.length) return [];
 
-  const loadsRows = await fetchJsonWithTimeout({
-    url: `${SUPABASE_URL}/rest/v1/loads?select=id,employer_id,origin_city,destination_city,pickup_date,load_type,trailer_type,price,currency,status,created_at&id=in.(${loadIds.join(
-      ","
-    )})`,
-    headers,
-    timeoutMs,
-  });
+  const buildLoadsUrl = (includePickupTime) =>
+    `${SUPABASE_URL}/rest/v1/loads?select=${
+      includePickupTime
+        ? "id,employer_id,origin_city,destination_city,pickup_date,pickup_time,load_type,trailer_type,price,currency,status,created_at"
+        : "id,employer_id,origin_city,destination_city,pickup_date,load_type,trailer_type,price,currency,status,created_at"
+    }&id=in.(${loadIds.join(",")})`;
+
+  let loadsRows = null;
+  try {
+    loadsRows = await fetchJsonWithTimeout({
+      url: buildLoadsUrl(true),
+      headers,
+      timeoutMs,
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error, "pickup_time")) throw error;
+    loadsRows = await fetchJsonWithTimeout({
+      url: buildLoadsUrl(false),
+      headers,
+      timeoutMs,
+    });
+  }
   const todayDateKey = getTodayDateKey();
   const loads = Array.isArray(loadsRows)
     ? loadsRows.filter((row) => isTodayOrFuturePickupDate(row.pickup_date, todayDateKey))
@@ -1054,6 +1115,7 @@ export const fetchDriverFeedViaRestApi = async ({ userId, accessToken, timeoutMs
       origin_city: load.origin_city || "-",
       destination_city: load.destination_city || "-",
       pickup_date: load.pickup_date || null,
+      pickup_time: load.pickup_time || null,
       load_type: load.load_type || "-",
       trailer_type: load.trailer_type || "-",
       load_price: load.price || 0,
@@ -1070,11 +1132,22 @@ export const fetchDriverFeedViaRestApi = async ({ userId, accessToken, timeoutMs
 };
 
 export const fetchEmployerFeedApi = async ({ userId }) => {
-  const loadsRes = await supabase
+  const selectWithPickupTime =
+    "id, employer_id, origin_city, destination_city, pickup_date, pickup_time, load_type, trailer_type, price, currency, status, created_at";
+  const selectWithoutPickupTime =
+    "id, employer_id, origin_city, destination_city, pickup_date, load_type, trailer_type, price, currency, status, created_at";
+  let loadsRes = await supabase
     .from("loads")
-    .select("id, employer_id, origin_city, destination_city, pickup_date, load_type, trailer_type, price, currency, status, created_at")
+    .select(selectWithPickupTime)
     .eq("employer_id", userId)
     .order("created_at", { ascending: false });
+  if (loadsRes.error && isMissingColumnError(loadsRes.error, "pickup_time")) {
+    loadsRes = await supabase
+      .from("loads")
+      .select(selectWithoutPickupTime)
+      .eq("employer_id", userId)
+      .order("created_at", { ascending: false });
+  }
   const todayDateKey = getTodayDateKey();
   const loads = unwrap(loadsRes, "Failed to fetch employer feed loads").filter((row) =>
     isTodayOrFuturePickupDate(row.pickup_date, todayDateKey)
@@ -1131,6 +1204,7 @@ export const fetchEmployerFeedApi = async ({ userId }) => {
       origin_city: load.origin_city,
       destination_city: load.destination_city,
       pickup_date: load.pickup_date,
+      pickup_time: load.pickup_time || null,
       load_type: load.load_type,
       trailer_type: load.trailer_type,
       load_price: load.price,
@@ -1152,13 +1226,28 @@ export const fetchEmployerFeedViaRestApi = async ({ userId, accessToken, timeout
     Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
   };
 
-  const loadsRows = await fetchJsonWithTimeout({
-    url: `${SUPABASE_URL}/rest/v1/loads?select=id,employer_id,origin_city,destination_city,pickup_date,load_type,trailer_type,price,currency,status,created_at&employer_id=eq.${encodeURIComponent(
-      userId
-    )}&order=created_at.desc`,
-    headers,
-    timeoutMs,
-  });
+  const buildLoadsUrl = (includePickupTime) =>
+    `${SUPABASE_URL}/rest/v1/loads?select=${
+      includePickupTime
+        ? "id,employer_id,origin_city,destination_city,pickup_date,pickup_time,load_type,trailer_type,price,currency,status,created_at"
+        : "id,employer_id,origin_city,destination_city,pickup_date,load_type,trailer_type,price,currency,status,created_at"
+    }&employer_id=eq.${encodeURIComponent(userId)}&order=created_at.desc`;
+
+  let loadsRows = null;
+  try {
+    loadsRows = await fetchJsonWithTimeout({
+      url: buildLoadsUrl(true),
+      headers,
+      timeoutMs,
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error, "pickup_time")) throw error;
+    loadsRows = await fetchJsonWithTimeout({
+      url: buildLoadsUrl(false),
+      headers,
+      timeoutMs,
+    });
+  }
   const todayDateKey = getTodayDateKey();
   const loads = Array.isArray(loadsRows)
     ? loadsRows.filter((row) => isTodayOrFuturePickupDate(row.pickup_date, todayDateKey))
@@ -1234,6 +1323,7 @@ export const fetchEmployerFeedViaRestApi = async ({ userId, accessToken, timeout
       origin_city: load.origin_city,
       destination_city: load.destination_city,
       pickup_date: load.pickup_date,
+      pickup_time: load.pickup_time || null,
       load_type: load.load_type,
       trailer_type: load.trailer_type,
       load_price: load.price,
@@ -1325,6 +1415,26 @@ export const fetchFeedbackItemsApi = async ({ limit = 40 } = {}) => {
   return unwrap(res, "Failed to fetch feedback items");
 };
 
+export const fetchFeedbackItemsViaRestApi = async ({
+  limit = 40,
+  accessToken,
+  timeoutMs = 12000,
+} = {}) => {
+  const safeLimit = Math.max(5, Math.min(100, Number(limit) || 40));
+  const headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+  };
+
+  const rows = await fetchJsonWithTimeout({
+    url: `${SUPABASE_URL}/rest/v1/feedback_items?select=id,user_id,author_name,content,codex_comment,status_tag,moderation_status,created_at,updated_at&order=created_at.desc&limit=${safeLimit}`,
+    headers,
+    timeoutMs,
+  });
+
+  return Array.isArray(rows) ? rows : [];
+};
+
 export const createFeedbackItemApi = async ({
   userId,
   authorName,
@@ -1348,4 +1458,65 @@ export const createFeedbackItemApi = async ({
     .select("id, user_id, author_name, content, codex_comment, status_tag, moderation_status, created_at, updated_at")
     .single();
   return unwrap(res, "Failed to create feedback item");
+};
+
+export const createFeedbackItemViaRestApi = async ({
+  userId,
+  authorName,
+  content,
+  codexComment,
+  statusTag,
+  moderationStatus,
+  accessToken,
+  timeoutMs = 12000,
+}) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/feedback_items`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        author_name: String(authorName || "Kullanıcı").trim(),
+        content: String(content || "").trim(),
+        codex_comment: String(codexComment || "").trim(),
+        status_tag: String(statusTag || "yapilacak"),
+        moderation_status: String(moderationStatus || "published"),
+      }),
+    });
+
+    const text = await res.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+
+    if (!res.ok) {
+      const message =
+        (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
+        text ||
+        `HTTP ${res.status}`;
+      throw new Error(`Failed to create feedback item: ${message}`);
+    }
+
+    if (Array.isArray(parsed)) return parsed[0] || null;
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Failed to create feedback item: Request timeout after ${timeoutMs / 1000}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 };

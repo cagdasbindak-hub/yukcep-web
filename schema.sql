@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS public.loads (
   kdv_included BOOLEAN NOT NULL DEFAULT true,
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'assigned', 'in_transit', 'delivered', 'completed', 'cancelled')),
   pickup_date DATE NOT NULL,
+  pickup_time TIME,
   created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
   is_urgent BOOLEAN NOT NULL DEFAULT false,
   is_fleet BOOLEAN NOT NULL DEFAULT false,
@@ -103,6 +104,9 @@ ALTER TABLE IF EXISTS public.profiles
 
 ALTER TABLE IF EXISTS public.loads
   ADD COLUMN IF NOT EXISTS kdv_included BOOLEAN NOT NULL DEFAULT true;
+
+ALTER TABLE IF EXISTS public.loads
+  ADD COLUMN IF NOT EXISTS pickup_time TIME;
 
 ALTER TABLE IF EXISTS public.bids
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now());

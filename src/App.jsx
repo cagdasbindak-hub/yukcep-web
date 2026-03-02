@@ -6,6 +6,7 @@ import {
   createBidApi,
   createBidViaRestApi,
   createFeedbackItemApi,
+  createFeedbackItemViaRestApi,
   createLoadApi,
   createLoadViaRestApi,
   createNotificationApi,
@@ -13,6 +14,7 @@ import {
   fetchDriverFeedApi,
   fetchDriverFeedViaRestApi,
   fetchFeedbackItemsApi,
+  fetchFeedbackItemsViaRestApi,
   fetchBidsForLoadApi,
   fetchBidsForLoadViaRestApi,
   fetchEmployerFeedApi,
@@ -46,6 +48,7 @@ const TurkeyHeatmap = lazy(() => import('./components/TurkeyHeatmap'));
 
 // ─── DATA ───
 const cities = [...TURKEY_CITY_NAMES].sort((a, b) => a.localeCompare(b, "tr-TR"));
+const CITY_NAME_BY_KEY = Object.fromEntries(cities.map((cityName) => [normalizeCityKey(cityName), cityName]));
 const dorseTypes = [{ k: "Kapalı", icon: "📦", color: "#3b82f6" }, { k: "Açık", icon: "🚛", color: "#f59e0b" }, { k: "Frigorifik", icon: "❄️", color: "#06b6d4" }];
 const fmt = n => n.toLocaleString("tr-TR");
 
@@ -96,6 +99,10 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-02", title: "Açılış animasyonu güncellendi: TIR merkezde durup şoför selam animasyonu gösteriyor." },
+  { date: "2026-03-02", title: "İşveren ilan formuna yükleme tarihi + saati eklendi; sürücü/işveren feed kartlarında planlanan yükleme saatli gösteriliyor." },
+  { date: "2026-03-02", title: "Neredesiniz ekranına şehir bazlı aktif ilan badge'leri eklendi; kullanıcılar şehir seçmeden önce yoğunluğu görebiliyor." },
+  { date: "2026-03-02", title: "İş Ara akışında konum kullanımı eklendi: kullanıcı konumu alınırsa eşleşen şehir listenin en üstünde öneriliyor." },
   { date: "2026-03-02", title: "İlan publish tarihinde timezone düzeltmesi yapıldı: pickup_date artık Europe/Istanbul gün anahtarına göre set ediliyor." },
   { date: "2026-03-01", title: "Feedback panosu manuel moda alındı: yorum ve etiketler Codex tarafından tek tek elle değerlendiriliyor (otomatik karar kapatıldı)." },
   { date: "2026-03-01", title: "Feedback panosunda eski otomatik yorum/tag sonuçları sıfırdan yeniden değerlendiriliyor; yanlış filtrelenen öneriler tekrar etiketleniyor." },
@@ -145,7 +152,7 @@ const FEEDBACK_FETCH_COOLDOWN_MS = 2400;
 const REPORT_RATE_LIMIT_MS = 5 * 60 * 1000;
 const FEEDBACK_RATE_LIMIT_MS = 45 * 1000;
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "2026.03.01";
-const FEEDBACK_REVIEW_VERSION = 3;
+const FEEDBACK_REVIEW_VERSION = 4;
 
 const getIstanbulDateKey = () => {
   try {
@@ -153,6 +160,48 @@ const getIstanbulDateKey = () => {
   } catch {
     return new Date().toISOString().slice(0, 10);
   }
+};
+
+const isPastIstanbulDate = (value) => {
+  const key = String(value || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return false;
+  return key < getIstanbulDateKey();
+};
+
+const resolveTurkeyCityNameFromText = (value = "") => {
+  const normalized = normalizeCityKey(value);
+  if (!normalized) return null;
+  if (CITY_NAME_BY_KEY[normalized]) return CITY_NAME_BY_KEY[normalized];
+  const fuzzyKey = Object.keys(CITY_NAME_BY_KEY).find(
+    (cityKey) => normalized.includes(cityKey) || cityKey.includes(normalized)
+  );
+  return fuzzyKey ? CITY_NAME_BY_KEY[fuzzyKey] : null;
+};
+
+const extractCityFromReversePayload = (payload = {}) => {
+  const candidates = [
+    payload?.city,
+    payload?.locality,
+    payload?.town,
+    payload?.village,
+    payload?.county,
+    payload?.province,
+    payload?.principalSubdivision,
+    payload?.state,
+    payload?.state_district,
+  ];
+
+  if (payload?.localityInfo?.administrative && Array.isArray(payload.localityInfo.administrative)) {
+    payload.localityInfo.administrative.forEach((row) => {
+      if (row?.name) candidates.push(row.name);
+    });
+  }
+
+  for (const candidate of candidates) {
+    const cityName = resolveTurkeyCityNameFromText(candidate);
+    if (cityName) return cityName;
+  }
+  return null;
 };
 
 const DEFAULT_USER_SETTINGS = {
@@ -277,34 +326,44 @@ const sanitizeFeedbackItems = (items = []) =>
 
 const MANUAL_FEEDBACK_DECISIONS = {
   10: {
-    statusTag: "yapilacak",
+    statusTag: "yapildi",
     moderationStatus: "published",
-    codexComment: "Yaratıcı ama ikincil öncelik. Önce kritik akış bug'larını bitirip sonra açılış animasyonunu iyileştireceğim.",
+    codexComment: "Tamamlandı. Açılışta TIR merkezde duruyor ve sürücü selam animasyonu eklendi.",
+  },
+  12: {
+    statusTag: "yapildi",
+    moderationStatus: "published",
+    codexComment: "Tamamlandı. İşveren ilan formuna yükleme tarihi + saati eklendi ve feed ekranlarında saatli gösterim aktif.",
+  },
+  11: {
+    statusTag: "yapildi",
+    moderationStatus: "published",
+    codexComment: "Uygulandı. Güzel fikir olan geri bildirimler işleme alındı; yapılanlar tamamlandı, diğerleri için net karar/tag girildi.",
   },
   9: {
-    statusTag: "yapilacak",
+    statusTag: "yapildi",
     moderationStatus: "published",
-    codexComment: "Çok iyi öneri. Konuma göre eşleşen şehri üstte göstermek arama deneyimini net iyileştirir; planlandı.",
+    codexComment: "Tamamlandı. Konum kullanımı eklendi ve algılanan şehir listede en üstte öneriliyor.",
   },
   8: {
-    statusTag: "yapilacak",
+    statusTag: "yapildi",
     moderationStatus: "published",
-    codexComment: "Değerli geri bildirim. Şehir yanında aktif ilan sayısı badge'i eklenmesi görev listesine alındı.",
+    codexComment: "Tamamlandı. Şehir listesine aktif ilan sayısı badge'i eklendi; seçim öncesi yoğunluk görülebiliyor.",
   },
   7: {
-    statusTag: "yapilacak",
+    statusTag: "yapildi",
     moderationStatus: "published",
-    codexComment: "Aynı öneri daha önce de iletilmiş; tek görev altında birleştirildi ve uygulanacak.",
+    codexComment: "Tamamlandı. Aynı talep #8 ile birleştirilip şehir badge özelliği olarak uygulandı.",
   },
   6: {
-    statusTag: "yapilacak",
+    statusTag: "yapildi",
     moderationStatus: "published",
-    codexComment: "Teknik olarak doğru fikir. WebSocket/SSE gerçek zamanlı güncelleme için yol haritasına alındı.",
+    codexComment: "Çözüldü. Supabase Realtime ile canlı güncelleme aktif; ek WebSocket/SSE katmanı bu sürüm için gerekli görülmedi.",
   },
   5: {
-    statusTag: "yapim_asamasinda",
+    statusTag: "yapildi",
     moderationStatus: "published",
-    codexComment: "İşlevsiz buton geri bildirimi doğru. Düzeltmeler kademeli ilerliyor; kalan butonlar geliştirme aşamasında.",
+    codexComment: "Uygulandı. Kritik işlevsiz buton akışları (çıkış, ilan yayınlama, feed yönlendirmeleri) çalışır hale getirildi.",
   },
   4: {
     statusTag: "yapildi",
@@ -589,9 +648,24 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMsg, setChatMsg] = useState("");
   const [chatMessages, setChatMessages] = useState([{ from: "bot", text: "Merhaba! YükCep destek hattına hoş geldiniz. Size nasıl yardımcı olabilirim?" }]);
-  const [empForm, setEmpForm] = useState({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
+  const [empForm, setEmpForm] = useState({
+    from: "",
+    to: "",
+    type: "",
+    trailer: "Kapalı",
+    price: "",
+    kdv: true,
+    fleet: false,
+    trucks: 1,
+    pickupDate: getIstanbulDateKey(),
+    pickupTime: "09:00",
+  });
   const [formErrors, setFormErrors] = useState({});
   const [locationQuery, setLocationQuery] = useState("");
+  const [detectedLocationCity, setDetectedLocationCity] = useState("");
+  const [isDetectingLocationCity, setIsDetectingLocationCity] = useState(false);
+  const [locationDetectError, setLocationDetectError] = useState("");
+  const [locationAutoPromptDone, setLocationAutoPromptDone] = useState(false);
   const [publicStats, setPublicStats] = useState({ activeLoads: 0, activeDrivers: 0, activeCities: 0 });
   const chatEndRef = useRef(null);
 
@@ -1142,6 +1216,8 @@ export default function App() {
     setFilterTo("");
     setFilterTrailer("");
     setCity(selectedCity);
+    setDetectedLocationCity(selectedCity);
+    setLocationDetectError("");
     setLocationQuery("");
     nav("map");
   }, [nav]);
@@ -1440,9 +1516,10 @@ export default function App() {
     try {
       appendRuntimeLog("info", "BID_DECISION_STARTED", `bid=${bidId} action=${action}`);
       const accessToken = readCachedAccessToken();
-      const pickupDateText = selectedLoadDetail?.raw?.pickup_date
-        ? formatDateOnly(selectedLoadDetail.raw.pickup_date)
-        : "Belirlenecek";
+      const pickupDateText = formatPickupSchedule(
+        selectedLoadDetail?.raw?.pickup_date,
+        selectedLoadDetail?.raw?.pickup_time
+      );
       const updateBidStatusReliable = async (targetBidId, targetStatus, timeoutMs) => {
         if (accessToken) {
           try {
@@ -1604,6 +1681,124 @@ export default function App() {
     setTimeout(() => setToast(null), ttl);
   };
 
+  const detectCityFromCoordinates = useCallback(async (latitude, longitude) => {
+    const buildReverseUrl = (baseUrl) =>
+      `${baseUrl}?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}&localityLanguage=tr`;
+
+    const tryBigDataCloud = async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(
+          buildReverseUrl("https://api.bigdatacloud.net/data/reverse-geocode-client"),
+          { signal: controller.signal }
+        );
+        if (!response.ok) return null;
+        const payload = await response.json();
+        return extractCityFromReversePayload(payload);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
+    const tryNominatim = async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+            latitude
+          )}&lon=${encodeURIComponent(longitude)}&zoom=10&addressdetails=1&accept-language=tr`,
+          { signal: controller.signal }
+        );
+        if (!response.ok) return null;
+        const payload = await response.json();
+        return extractCityFromReversePayload(payload?.address || payload || {});
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
+    try {
+      const bdcCity = await tryBigDataCloud();
+      if (bdcCity) return bdcCity;
+    } catch {
+      // ignore and continue to fallback
+    }
+
+    try {
+      const osmCity = await tryNominatim();
+      if (osmCity) return osmCity;
+    } catch {
+      // ignore
+    }
+
+    return null;
+  }, []);
+
+  const handleUseCurrentLocation = useCallback(
+    async ({ silent = false } = {}) => {
+      if (isDetectingLocationCity) return;
+      if (typeof navigator === "undefined" || !navigator.geolocation) {
+        if (!silent) showToast("Bu cihazda konum servisi desteklenmiyor.", "error");
+        setLocationDetectError("Cihaz konum servisi desteklenmiyor.");
+        return;
+      }
+
+      setIsDetectingLocationCity(true);
+      setLocationDetectError("");
+      appendRuntimeLog("info", "LOCATION_CITY_DETECT_START", "Konumdan şehir çözümleme başlatıldı.");
+
+      try {
+        const position = await new Promise((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: false,
+            timeout: 10000,
+            maximumAge: 5 * 60 * 1000,
+          });
+        });
+
+        const latitude = position?.coords?.latitude;
+        const longitude = position?.coords?.longitude;
+        if (typeof latitude !== "number" || typeof longitude !== "number") {
+          throw new Error("Konum koordinatları okunamadı.");
+        }
+
+        const resolvedCity = await detectCityFromCoordinates(latitude, longitude);
+        if (!resolvedCity) {
+          throw new Error("Konum bulundu ancak Türkiye şehir eşleşmesi yapılamadı.");
+        }
+
+        setDetectedLocationCity(resolvedCity);
+        setLocationQuery(resolvedCity);
+        appendRuntimeLog("info", "LOCATION_CITY_DETECT_OK", `city=${resolvedCity}`);
+        if (!silent) showToast(`Konum eşleşti: ${resolvedCity}`);
+      } catch (error) {
+        const code = error?.code;
+        const geoMessage = code === 1
+          ? "Konum izni reddedildi."
+          : code === 2
+            ? "Konum bilgisi alınamadı."
+            : code === 3
+              ? "Konum alma zaman aşımına uğradı."
+              : (error?.message || "Konumdan şehir belirlenemedi.");
+        setLocationDetectError(geoMessage);
+        appendRuntimeLog("warn", "LOCATION_CITY_DETECT_FAIL", geoMessage);
+        if (!silent) showToast(geoMessage, "error");
+      } finally {
+        setIsDetectingLocationCity(false);
+      }
+    },
+    [appendRuntimeLog, detectCityFromCoordinates, isDetectingLocationCity]
+  );
+
+  useEffect(() => {
+    if (screen !== "location") return;
+    if (locationAutoPromptDone) return;
+    setLocationAutoPromptDone(true);
+    handleUseCurrentLocation({ silent: true });
+  }, [handleUseCurrentLocation, locationAutoPromptDone, screen]);
+
   const pushPersistentError = useCallback((source, message) => {
     const detail = String(message || "Beklenmeyen hata").trim();
     setPersistentError({
@@ -1719,18 +1914,39 @@ export default function App() {
 
     setIsPostingFeedback(true);
     try {
-      const created = await withTimeout(
-        createFeedbackItemApi({
-          userId: user.id,
-          authorName: profile?.full_name || user?.email?.split("@")[0] || "Kullanıcı",
-          content: normalizedInput,
-          codexComment: triage.codexComment,
-          statusTag: triage.statusTag,
-          moderationStatus: triage.moderationStatus,
-        }),
-        10000,
-        "Feedback gönderimi zaman aşımına uğradı (10sn)."
-      );
+      let created = null;
+      try {
+        created = await withTimeout(
+          createFeedbackItemApi({
+            userId: user.id,
+            authorName: profile?.full_name || user?.email?.split("@")[0] || "Kullanıcı",
+            content: normalizedInput,
+            codexComment: triage.codexComment,
+            statusTag: triage.statusTag,
+            moderationStatus: triage.moderationStatus,
+          }),
+          10000,
+          "Feedback gönderimi zaman aşımına uğradı (10sn)."
+        );
+      } catch (primaryError) {
+        appendRuntimeLog("warn", "FEEDBACK_CREATE_SUPABASE_FAIL", primaryError?.message || "Feedback create primary failed");
+        const accessToken = readCachedAccessToken();
+        created = await withTimeout(
+          createFeedbackItemViaRestApi({
+            userId: user.id,
+            authorName: profile?.full_name || user?.email?.split("@")[0] || "Kullanıcı",
+            content: normalizedInput,
+            codexComment: triage.codexComment,
+            statusTag: triage.statusTag,
+            moderationStatus: triage.moderationStatus,
+            accessToken,
+            timeoutMs: 10000,
+          }),
+          11000,
+          "Feedback REST gönderimi zaman aşımına uğradı (11sn)."
+        );
+        appendRuntimeLog("info", "FEEDBACK_CREATE_REST_OK", "Feedback REST fallback ile kaydedildi.");
+      }
 
       setFeedbackItems((prev) => {
         const merged = sanitizeFeedbackItems([created, ...prev]);
@@ -2011,6 +2227,26 @@ export default function App() {
       return "Belirsiz";
     }
   };
+  const formatTimeOnly = (value) => {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const hhmmMatch = raw.match(/^(\d{2}:\d{2})/);
+    if (hhmmMatch) return hhmmMatch[1];
+    try {
+      return new Date(`1970-01-01T${raw}`).toLocaleTimeString("tr-TR", {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return raw;
+    }
+  };
+  const formatPickupSchedule = (dateValue, timeValue) => {
+    if (!dateValue) return "Belirlenecek";
+    const dateText = formatDateOnly(dateValue);
+    const timeText = formatTimeOnly(timeValue);
+    return timeText ? `${dateText} · ${timeText}` : dateText;
+  };
   const getBidStatusUi = (status) => {
     const key = String(status || "PENDING").toUpperCase();
     if (key === "ACCEPTED") {
@@ -2052,25 +2288,72 @@ export default function App() {
   const [filterTo, setFilterTo] = useState("");
   const [filterTrailer, setFilterTrailer] = useState("");
 
+  const locationCityLoadCounts = useMemo(() => {
+    const countsByKey = {};
+    realLoads.forEach((load) => {
+      const fromName = resolveTurkeyCityNameFromText(load?.from || "");
+      const toName = resolveTurkeyCityNameFromText(load?.to || "");
+      if (fromName) {
+        const fromKey = normalizeCityKey(fromName);
+        countsByKey[fromKey] = (countsByKey[fromKey] || 0) + 1;
+      }
+      if (toName) {
+        const toKey = normalizeCityKey(toName);
+        countsByKey[toKey] = (countsByKey[toKey] || 0) + 1;
+      }
+    });
+    return countsByKey;
+  }, [realLoads]);
+
+  const preferredLocationCity = useMemo(
+    () => resolveTurkeyCityNameFromText(detectedLocationCity),
+    [detectedLocationCity]
+  );
+
   const filteredLocationCities = useMemo(() => {
     const normalized = normalizeCityKey(locationQuery);
-    if (!normalized) return cities;
-    return cities.filter((cityName) =>
-      normalizeCityKey(cityName).includes(normalized)
-    );
-  }, [locationQuery]);
+    const baseCities = normalized
+      ? cities.filter((cityName) => normalizeCityKey(cityName).includes(normalized))
+      : [...cities];
+
+    return baseCities.sort((a, b) => {
+      if (preferredLocationCity) {
+        if (a === preferredLocationCity) return -1;
+        if (b === preferredLocationCity) return 1;
+      }
+      const countA = locationCityLoadCounts[normalizeCityKey(a)] || 0;
+      const countB = locationCityLoadCounts[normalizeCityKey(b)] || 0;
+      if (countA !== countB) return countB - countA;
+      return a.localeCompare(b, "tr-TR");
+    });
+  }, [locationCityLoadCounts, locationQuery, preferredLocationCity]);
+
+  const topSuggestedLocationCities = useMemo(() => {
+    if (!preferredLocationCity) return [];
+    return filteredLocationCities.includes(preferredLocationCity) ? [preferredLocationCity] : [];
+  }, [filteredLocationCities, preferredLocationCity]);
 
   const groupedLocationCities = useMemo(() => {
     const groups = {};
+    const skipCities = new Set(topSuggestedLocationCities);
     filteredLocationCities.forEach((cityName) => {
+      if (skipCities.has(cityName)) return;
       const letter = cityName[0].toLocaleUpperCase("tr-TR");
       if (!groups[letter]) groups[letter] = [];
       groups[letter].push(cityName);
     });
-    return Object.entries(groups).sort((a, b) =>
-      a[0].localeCompare(b[0], "tr-TR")
-    );
-  }, [filteredLocationCities]);
+    return Object.entries(groups)
+      .sort((a, b) => a[0].localeCompare(b[0], "tr-TR"))
+      .map(([letter, groupCities]) => [
+        letter,
+        [...groupCities].sort((a, b) => {
+          const countA = locationCityLoadCounts[normalizeCityKey(a)] || 0;
+          const countB = locationCityLoadCounts[normalizeCityKey(b)] || 0;
+          if (countA !== countB) return countB - countA;
+          return a.localeCompare(b, "tr-TR");
+        }),
+      ]);
+  }, [filteredLocationCities, locationCityLoadCounts, topSuggestedLocationCities]);
 
   const handleClearFilters = () => {
     setFilterFrom("");
@@ -2189,6 +2472,31 @@ export default function App() {
             message = retryError?.message || message;
             appendRuntimeLog("warn", "FEEDBACK_FETCH_RETRY_FAIL", message);
           }
+        }
+
+        try {
+          const accessToken = readCachedAccessToken();
+          const restRows = await withTimeout(
+            fetchFeedbackItemsViaRestApi({
+              limit: 50,
+              accessToken,
+              timeoutMs: 10000,
+            }),
+            11000,
+            "Feedback REST listesi zaman aşımına uğradı (11sn)."
+          );
+          persistFeedbackItems(restRows);
+          setFeedbackError("");
+          appendRuntimeLog(
+            "info",
+            "FEEDBACK_REST_OK",
+            `rows=${Array.isArray(restRows) ? restRows.length : 0}`
+          );
+          return restRows;
+        } catch (restError) {
+          effectiveError = restError;
+          message = restError?.message || message;
+          appendRuntimeLog("warn", "FEEDBACK_REST_FAIL", message);
         }
 
         appendRuntimeLog("warn", "FEEDBACK_FETCH_FAIL", message);
@@ -2402,6 +2710,8 @@ export default function App() {
     if (!empForm.type) errors.type = "Yük cinsi gerekli";
     if (!empForm.price) errors.price = "Fiyat gerekli";
     else if (isNaN(empForm.price)) errors.price = "Fiyat sayı olmalı";
+    if (!empForm.pickupDate) errors.pickupDate = "Yükleme tarihi gerekli";
+    else if (isPastIstanbulDate(empForm.pickupDate)) errors.pickupDate = "Geçmiş tarih seçilemez";
 
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
@@ -2482,7 +2792,8 @@ export default function App() {
         is_urgent: false,
         is_fleet: empForm.fleet,
         truck_count: empForm.fleet ? Number(empForm.trucks) || 1 : 1,
-        pickup_date: getIstanbulDateKey(),
+        pickup_date: empForm.pickupDate || getIstanbulDateKey(),
+        pickup_time: String(empForm.pickupTime || "").trim() || null,
         employer_id: user.id,
         status: "open",
         currency: "TRY",
@@ -2569,6 +2880,7 @@ export default function App() {
         currency: loadData.currency || "TRY",
         status: loadData.status || "open",
         pickup_date: loadData.pickup_date,
+        pickup_time: loadData.pickup_time || null,
         created_at: new Date().toISOString(),
         is_urgent: loadData.is_urgent,
         is_fleet: loadData.is_fleet,
@@ -2587,10 +2899,26 @@ export default function App() {
       applyLocalStatsFallback(nextVisibleLoads, { incrementLoads: true });
 
       setPostLoadError("");
-      showToast(empForm.fleet ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında!` : "✅ İlanınız başarıyla yayınlandı!");
+      const pickupSummary = formatPickupSchedule(loadData.pickup_date, loadData.pickup_time);
+      showToast(
+        empForm.fleet
+          ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında! Yükleme: ${pickupSummary}`
+          : `✅ İlanınız başarıyla yayınlandı! Yükleme: ${pickupSummary}`
+      );
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 100);
-      setEmpForm({ from: "", to: "", type: "", trailer: "Kapalı", price: "", kdv: true, fleet: false, trucks: 1, date: "Pazartesi" });
+      setEmpForm({
+        from: "",
+        to: "",
+        type: "",
+        trailer: "Kapalı",
+        price: "",
+        kdv: true,
+        fleet: false,
+        trucks: 1,
+        pickupDate: getIstanbulDateKey(),
+        pickupTime: "09:00",
+      });
       setFormErrors({});
       try {
         await withTimeout(
@@ -2895,7 +3223,10 @@ export default function App() {
                   {user ? (
                     <div className="relative">
                       <button
-                        onClick={() => setShowProfileCard(!showProfileCard)}
+                        onClick={() => {
+                          setShowProfileCard(true);
+                          setShowNotifications(false);
+                        }}
                         className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm active:scale-95 transition-all border-2 border-blue-500/50"
                         style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}
                       >
@@ -3255,6 +3586,28 @@ export default function App() {
                   placeholder="Sehir ara... (Ornek: Istanbul, Erzurum)"
                   className="w-full py-3 px-4 rounded-xl bg-slate-900 border border-slate-700 text-white font-semibold placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 />
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => handleUseCurrentLocation({ silent: false })}
+                    disabled={isDetectingLocationCity}
+                    className={`px-3 py-2 rounded-xl text-xs font-black border ${
+                      isDetectingLocationCity
+                        ? "bg-slate-800 text-slate-500 border-slate-700 cursor-wait"
+                        : "bg-cyan-500/15 text-cyan-200 border-cyan-500/40 hover:bg-cyan-500/25"
+                    }`}
+                  >
+                    {isDetectingLocationCity ? "Konum Alınıyor..." : "📡 Konumumu Kullan"}
+                  </button>
+                  {detectedLocationCity && (
+                    <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[11px] font-bold">
+                      Öneri: {detectedLocationCity}
+                    </span>
+                  )}
+                </div>
+                {locationDetectError && (
+                  <p className="text-[11px] text-amber-300 font-bold">{locationDetectError}</p>
+                )}
               </div>
 
               <div className="max-h-[440px] overflow-y-auto pr-1 space-y-4">
@@ -3263,19 +3616,59 @@ export default function App() {
                     Sonuc bulunamadi.
                   </div>
                 )}
+                {topSuggestedLocationCities.length > 0 && (
+                  <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-3">
+                    <p className="text-[11px] font-black text-cyan-200 mb-2 tracking-wide">📍 SANA YAKIN ŞEHİR</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      {topSuggestedLocationCities.map((c) => {
+                        const cityLoadCount = locationCityLoadCounts[normalizeCityKey(c)] || 0;
+                        return (
+                          <button
+                            key={`top-${c}`}
+                            onClick={() => handleLocationSelect(c)}
+                            className="py-3 px-3 rounded-xl bg-cyan-600/20 border border-cyan-500 text-cyan-100 font-black text-sm hover:bg-cyan-500/25 transition-all active:scale-95 shadow-lg flex items-center justify-between gap-2"
+                          >
+                            <span>{c}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                                cityLoadCount > 0
+                                  ? "bg-emerald-500/20 border-emerald-400/50 text-emerald-200"
+                                  : "bg-slate-800/80 border-slate-600 text-slate-400"
+                              }`}
+                            >
+                              {cityLoadCount}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 {groupedLocationCities.map(([letter, groupCities]) => (
                   <div key={letter}>
                     <p className="text-xs font-black text-slate-500 mb-2 tracking-[0.15em]">{letter}</p>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-                      {groupCities.map((c) => (
-                        <button
-                          key={c}
-                          onClick={() => handleLocationSelect(c)}
-                          className="py-3 px-3 rounded-xl bg-slate-800 border border-slate-700/50 text-white font-bold text-sm hover:bg-blue-600 hover:border-blue-500 transition-all active:scale-95 shadow-lg"
-                        >
-                          {c}
-                        </button>
-                      ))}
+                      {groupCities.map((c) => {
+                        const cityLoadCount = locationCityLoadCounts[normalizeCityKey(c)] || 0;
+                        return (
+                          <button
+                            key={c}
+                            onClick={() => handleLocationSelect(c)}
+                            className="py-3 px-3 rounded-xl bg-slate-800 border border-slate-700/50 text-white font-bold text-sm hover:bg-blue-600 hover:border-blue-500 transition-all active:scale-95 shadow-lg flex items-center justify-between gap-2"
+                          >
+                            <span>{c}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                                cityLoadCount > 0
+                                  ? "bg-blue-500/25 border-blue-400/40 text-blue-100"
+                                  : "bg-slate-900/70 border-slate-600 text-slate-500"
+                              }`}
+                            >
+                              {cityLoadCount}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 ))}
@@ -3367,14 +3760,14 @@ export default function App() {
                             <p className="text-emerald-300 font-black">{fmt(Number(item.bid_price || 0))} ₺</p>
                           </div>
                           <div className="p-2 rounded-lg bg-slate-900/60 border border-slate-700/40">
-                            <p className="text-slate-500">Yükleme Tarihi</p>
-                            <p className="text-cyan-300 font-black">{formatDateOnly(item.pickup_date)}</p>
+                            <p className="text-slate-500">Yükleme Planı</p>
+                            <p className="text-cyan-300 font-black">{formatPickupSchedule(item.pickup_date, item.pickup_time)}</p>
                           </div>
                         </div>
                         <div className="space-y-1.5 text-[11px] text-slate-300 mb-3">
                           <p>1. Teklif gönderildi: <span className="text-slate-100 font-semibold">{formatDateTime(item.bid_created_at)}</span></p>
                           <p>2. İşveren kararı: <span className="text-slate-100 font-semibold">{formatDateTime(item.bid_updated_at)}</span></p>
-                          <p>3. İşi alım tarihi: <span className="text-slate-100 font-semibold">{formatDateOnly(item.pickup_date)}</span></p>
+                          <p>3. İşi alım planı: <span className="text-slate-100 font-semibold">{formatPickupSchedule(item.pickup_date, item.pickup_time)}</span></p>
                         </div>
                         <div className="flex items-center justify-between">
                           <p className="text-[11px] text-slate-400">İşveren: <span className="text-slate-200 font-semibold">{item.employer_name}</span></p>
@@ -3528,7 +3921,7 @@ export default function App() {
 
                       <div className="space-y-1.5 text-[11px] text-slate-300 mb-3">
                         <p>1. İlan yayınlandı: <span className="text-slate-100 font-semibold">{formatDateTime(item.load_created_at)}</span></p>
-                        <p>2. Yükleme tarihi: <span className="text-slate-100 font-semibold">{formatDateOnly(item.pickup_date)}</span></p>
+                        <p>2. Yükleme planı: <span className="text-slate-100 font-semibold">{formatPickupSchedule(item.pickup_date, item.pickup_time)}</span></p>
                         <p>3. Son durum: <span className="text-slate-100 font-semibold">{item.load_status || "open"}</span></p>
                       </div>
 
@@ -3915,6 +4308,13 @@ export default function App() {
                       </div>
                     </div>
 
+                    <div className="mb-4 p-3 rounded-xl bg-slate-900/40 border border-cyan-500/20">
+                      <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">Planlanan Yükleme</p>
+                      <p className="text-cyan-200 font-black text-sm">
+                        {formatPickupSchedule(selectedLoadDetail.raw?.pickup_date, selectedLoadDetail.raw?.pickup_time)}
+                      </p>
+                    </div>
+
                     <div className="pt-4 border-t border-slate-700/50 flex items-center justify-between">
                       <KdvBadge included={selectedLoadDetail.kdv} big />
                       {selectedLoadDetail.urgent && (
@@ -4286,6 +4686,36 @@ export default function App() {
                     </button>
                   </div>
                   {formErrors.price && <span className="text-red-400 text-[10px] font-bold absolute -bottom-4 left-1">{formErrors.price}</span>}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="relative">
+                    <label className="text-slate-400 text-xs font-bold mb-1.5 block ml-1 uppercase">📅 Yükleme Tarihi</label>
+                    <input
+                      type="date"
+                      value={empForm.pickupDate}
+                      min={getIstanbulDateKey()}
+                      onChange={(e) => {
+                        setEmpForm((prev) => ({ ...prev, pickupDate: e.target.value }));
+                        if (formErrors.pickupDate) setFormErrors((prev) => ({ ...prev, pickupDate: null }));
+                      }}
+                      className={`w-full py-4 px-4 rounded-xl bg-slate-800 border text-white text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none transition-all ${
+                        formErrors.pickupDate ? "border-red-500 ring-1 ring-red-500" : "border-slate-700"
+                      }`}
+                    />
+                    {formErrors.pickupDate && (
+                      <span className="text-red-400 text-[10px] font-bold absolute -bottom-4 left-1">{formErrors.pickupDate}</span>
+                    )}
+                  </div>
+                  <div>
+                    <label className="text-slate-400 text-xs font-bold mb-1.5 block ml-1 uppercase">⏰ Yükleme Saati</label>
+                    <input
+                      type="time"
+                      value={empForm.pickupTime}
+                      onChange={(e) => setEmpForm((prev) => ({ ...prev, pickupTime: e.target.value }))}
+                      className="w-full py-4 px-4 rounded-xl bg-slate-800 border border-slate-700 text-white text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                    />
+                  </div>
                 </div>
 
                 <div className="pt-2">

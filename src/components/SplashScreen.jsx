@@ -33,10 +33,10 @@ export default function SplashScreen({ onComplete }) {
   const stars = useMemo(() => generateStars(40), []);
 
   useEffect(() => {
-    const t1 = setTimeout(() => setPhase(1), 300);   // truck appears
-    const t2 = setTimeout(() => setPhase(2), 1000);   // title reveals
+    const t1 = setTimeout(() => setPhase(1), 300); // truck appears
+    const t2 = setTimeout(() => setPhase(2), 1100); // truck stops, driver waves, title reveals
     const t3 = setTimeout(() => setFadeOut(true), 2800); // fade out
-    const t4 = setTimeout(() => onComplete(), 3400);  // done
+    const t4 = setTimeout(() => onComplete(), 3400); // done
 
     return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4); };
   }, [onComplete]);
@@ -123,12 +123,12 @@ export default function SplashScreen({ onComplete }) {
       {/* ─── Truck + Exhaust ─── */}
       {phase >= 1 && (
         <div
-          className="absolute"
+          className="absolute splash-truck-stage"
           style={{
             bottom: "75px",
             left: "50%",
             transform: "translateX(-50%)",
-            animation: "splash-truck-drive 1.5s cubic-bezier(0.16, 1, 0.3, 1) forwards",
+            animation: "splash-truck-drive 1.7s cubic-bezier(0.16, 1, 0.3, 1) forwards",
           }}
         >
           {/* Headlight glow */}
@@ -142,6 +142,20 @@ export default function SplashScreen({ onComplete }) {
           <div className="splash-truck-bounce" style={{ fontSize: "64px", lineHeight: 1 }}>
             🚛
           </div>
+
+          {/* Driver appears when truck reaches center */}
+          {phase >= 2 && (
+            <>
+              <div className="splash-driver-pop" style={{ fontSize: "24px", lineHeight: 1 }}>
+                <span role="img" aria-label="driver">🧑‍✈️</span>
+                <span className="splash-driver-wave" role="img" aria-label="wave">👋</span>
+              </div>
+              <div className="splash-driver-bubble">
+                Selam!
+              </div>
+            </>
+          )}
+
           {/* Speed lines */}
           <div className="absolute -left-12 top-1/2 -translate-y-1/2 space-y-2">
             {[0, 1, 2].map((i) => (
