@@ -10,6 +10,9 @@ import {
   createLoadApi,
   createLoadViaRestApi,
   createNotificationApi,
+  createNotificationViaRestApi,
+  deleteLoadApi,
+  deleteLoadViaRestApi,
   ensureProfileApi,
   fetchDriverFeedApi,
   fetchDriverFeedViaRestApi,
@@ -30,8 +33,10 @@ import {
   fetchProfileById,
   insertRuntimeLogsApi,
   markNotificationReadApi,
+  updateLoadApi,
   updateProfileRoleApi,
   updateLoadStatusApi,
+  updateLoadViaRestApi,
   updateLoadStatusViaRestApi,
   updateBidStatusApi,
   updateBidStatusViaRestApi,
@@ -99,6 +104,8 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-02", title: "İşveren feed kartlarına İlan Düzenle + İlan Sil aksiyonları eklendi; ilan yönetimi tek ekrandan yapılabiliyor." },
+  { date: "2026-03-02", title: "İlan güncelleme/silme akışları canlı DB şema uyumluluğu için fallback ile sertleştirildi (pickup_time olmayan ortamlarda da çalışır)." },
   { date: "2026-03-02", title: "Açılış animasyonu güncellendi: TIR merkezde durup şoför selam animasyonu gösteriyor." },
   { date: "2026-03-02", title: "İşveren ilan formuna yükleme tarihi + saati eklendi; sürücü/işveren feed kartlarında planlanan yükleme saatli gösteriliyor." },
   { date: "2026-03-02", title: "Neredesiniz ekranına şehir bazlı aktif ilan badge'leri eklendi; kullanıcılar şehir seçmeden önce yoğunluğu görebiliyor." },
@@ -152,7 +159,7 @@ const FEEDBACK_FETCH_COOLDOWN_MS = 2400;
 const REPORT_RATE_LIMIT_MS = 5 * 60 * 1000;
 const FEEDBACK_RATE_LIMIT_MS = 45 * 1000;
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "2026.03.01";
-const FEEDBACK_REVIEW_VERSION = 4;
+const FEEDBACK_REVIEW_VERSION = 5;
 
 const getIstanbulDateKey = () => {
   try {
@@ -167,6 +174,19 @@ const isPastIstanbulDate = (value) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return false;
   return key < getIstanbulDateKey();
 };
+
+const createDefaultEmployerForm = () => ({
+  from: "",
+  to: "",
+  type: "",
+  trailer: "Kapalı",
+  price: "",
+  kdv: true,
+  fleet: false,
+  trucks: 1,
+  pickupDate: getIstanbulDateKey(),
+  pickupTime: "09:00",
+});
 
 const resolveTurkeyCityNameFromText = (value = "") => {
   const normalized = normalizeCityKey(value);
@@ -325,6 +345,16 @@ const sanitizeFeedbackItems = (items = []) =>
     .slice(0, 80);
 
 const MANUAL_FEEDBACK_DECISIONS = {
+  14: {
+    statusTag: "yapildi",
+    moderationStatus: "published",
+    codexComment: "Tamamlandı. Açılış animasyonu güncellendi; TIR merkezde duracak şekilde revize edildi.",
+  },
+  13: {
+    statusTag: "yapildi",
+    moderationStatus: "published",
+    codexComment: "Tamamlandı. İşveren tarafında ilan düzenle ve ilan sil aksiyonları eklendi; feed üzerinden çalışıyor.",
+  },
   10: {
     statusTag: "yapildi",
     moderationStatus: "published",
@@ -471,6 +501,11 @@ const isFeedbackTableMissingError = (errorOrMessage = "") => {
   return /(feedback_items|public\.feedback_items|schema\s*cache|pgrst205|42p01|relation .*feedback_items|does not exist|bulunamadi|not found|could not find the table)/i.test(
     String(message || "")
   );
+};
+
+const isNotificationRlsError = (errorOrMessage = "") => {
+  const message = buildFeedbackErrorText(errorOrMessage);
+  return /row-level security policy|notifications|permission denied/i.test(String(message || ""));
 };
 
 const parseFeedbackRuntimeDetails = (details = "") => {
@@ -648,18 +683,10 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMsg, setChatMsg] = useState("");
   const [chatMessages, setChatMessages] = useState([{ from: "bot", text: "Merhaba! YükCep destek hattına hoş geldiniz. Size nasıl yardımcı olabilirim?" }]);
-  const [empForm, setEmpForm] = useState({
-    from: "",
-    to: "",
-    type: "",
-    trailer: "Kapalı",
-    price: "",
-    kdv: true,
-    fleet: false,
-    trucks: 1,
-    pickupDate: getIstanbulDateKey(),
-    pickupTime: "09:00",
-  });
+  const [empForm, setEmpForm] = useState(() => createDefaultEmployerForm());
+  const [editingLoadId, setEditingLoadId] = useState(null);
+  const [editingLoadMeta, setEditingLoadMeta] = useState(null);
+  const [activeFeedActionLoadId, setActiveFeedActionLoadId] = useState(null);
   const [formErrors, setFormErrors] = useState({});
   const [locationQuery, setLocationQuery] = useState("");
   const [detectedLocationCity, setDetectedLocationCity] = useState("");
@@ -726,6 +753,13 @@ export default function App() {
   const loadsFetchKeyRef = useRef("");
   const feedbackFetchPromiseRef = useRef(null);
   const feedbackLastFetchAtRef = useRef(0);
+
+  const showToast = useCallback((msg, type = "success", durationMs) => {
+    setToast(msg);
+    setToastType(type);
+    const ttl = typeof durationMs === "number" ? durationMs : (type === "error" ? 9000 : 3000);
+    setTimeout(() => setToast(null), ttl);
+  }, []);
 
   useEffect(() => {
     latestRealLoadsRef.current = realLoads;
@@ -946,7 +980,7 @@ export default function App() {
     } catch {
       showToast("Loglar kopyalanamadı.", "error");
     }
-  }, [runtimeLogs]);
+  }, [runtimeLogs, showToast]);
 
   const withTimeout = useCallback(async (promise, timeoutMs, timeoutMessage) => {
     let timeoutId;
@@ -1131,7 +1165,7 @@ export default function App() {
       setNotifications([]);
       setUnreadCount(0);
     }
-  }, [fetchNotifications, user, userSettings.notificationsEnabled]);
+  }, [fetchNotifications, showToast, user, userSettings.notificationsEnabled]);
 
   const markNotificationRead = async (id) => {
     const wasUnread = notifications.find((n) => n.id === id)?.is_read === false;
@@ -1389,6 +1423,60 @@ export default function App() {
     }
   };
 
+  const notifyUserBestEffort = useCallback(
+    async ({ targetUserId, message, timeoutMs = 10000, warnEvent = "NOTIFY_WARN", infoEvent = "NOTIFY" }) => {
+      if (!targetUserId || !user?.id || !message) return false;
+
+      try {
+        await withTimeout(
+          createNotificationApi({
+            userId: targetUserId,
+            actorId: user.id,
+            message,
+          }),
+          timeoutMs,
+          `Bildirim zaman aşımına uğradı (${Math.ceil(timeoutMs / 1000)}sn).`
+        );
+        return true;
+      } catch (primaryError) {
+        const accessToken = readCachedAccessToken();
+        if (accessToken) {
+          try {
+            await withTimeout(
+              createNotificationViaRestApi({
+                userId: targetUserId,
+                actorId: user.id,
+                message,
+                accessToken,
+                timeoutMs: Math.max(6000, timeoutMs),
+              }),
+              timeoutMs + 1500,
+              `REST bildirim zaman aşımına uğradı (${Math.ceil((timeoutMs + 1500) / 1000)}sn).`
+            );
+            appendRuntimeLog("info", `${infoEvent}_REST_OK`, `target=${targetUserId}`);
+            return true;
+          } catch (restError) {
+            const finalError = restError || primaryError;
+            if (isNotificationRlsError(finalError)) {
+              appendRuntimeLog("info", `${infoEvent}_RLS_SKIP`, finalError?.message || "Notification RLS skip");
+              return false;
+            }
+            appendRuntimeLog("warn", warnEvent, finalError?.message || "Notification failed");
+            return false;
+          }
+        }
+
+        if (isNotificationRlsError(primaryError)) {
+          appendRuntimeLog("info", `${infoEvent}_RLS_SKIP`, primaryError?.message || "Notification RLS skip");
+          return false;
+        }
+        appendRuntimeLog("warn", warnEvent, primaryError?.message || "Notification failed");
+        return false;
+      }
+    },
+    [appendRuntimeLog, user?.id, withTimeout]
+  );
+
   const submitBid = async () => {
     if (!user || !selectedLoadDetail || !bidPrice) return;
     if (userSettings.requireEmailVerified && !isEmailVerified) {
@@ -1473,21 +1561,15 @@ export default function App() {
       }
 
       // 2. Notify Employer (non-blocking for bidder UX)
-      try {
-        const bidIdTag = createdBid?.id ? `[BID:${createdBid.id}] ` : "";
-        const notifyMessage = `Yeni Teklif ${bidIdTag}${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ${price}₺`;
-        await withTimeout(
-          createNotificationApi({
-            userId: selectedLoadDetail.raw.employer_id,
-            actorId: user.id,
-            message: notifyMessage,
-          }),
-          10000,
-          "Teklif bildirimi zaman aşımına uğradı (10sn)."
-        );
-      } catch (notifyError) {
-        appendRuntimeLog("warn", "BID_NOTIFY_WARN", notifyError?.message || "Notification timeout");
-      }
+      const bidIdTag = createdBid?.id ? `[BID:${createdBid.id}] ` : "";
+      const notifyMessage = `Yeni Teklif ${bidIdTag}${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ${price}₺`;
+      await notifyUserBestEffort({
+        targetUserId: selectedLoadDetail.raw.employer_id,
+        message: notifyMessage,
+        timeoutMs: 10000,
+        warnEvent: "BID_NOTIFY_WARN",
+        infoEvent: "BID_NOTIFY",
+      });
 
       setHasBid(true);
       appendRuntimeLog("info", "BID_SUBMIT_OK", `load=${selectedLoadDetail.id} price=${price}`);
@@ -1584,19 +1666,13 @@ export default function App() {
 
       // 2. Notify Driver (non-blocking)
       const statusText = action === 'ACCEPTED' ? 'KABUL EDİLDİ ✅' : 'REDDEDİLDİ ❌';
-      try {
-        await withTimeout(
-          createNotificationApi({
-            userId: driverId,
-            actorId: user.id,
-            message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to}. Yükleme: ${pickupDateText}.`,
-          }),
-          10000,
-          "Teklif karar bildirimi zaman aşımına uğradı (10sn)."
-        );
-      } catch (notifyDriverError) {
-        appendRuntimeLog("warn", "BID_NOTIFY_DECISION_WARN", notifyDriverError?.message || "Decision notify failed");
-      }
+      await notifyUserBestEffort({
+        targetUserId: driverId,
+        message: `Teklifiniz ${statusText}: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to}. Yükleme: ${pickupDateText}.`,
+        timeoutMs: 10000,
+        warnEvent: "BID_NOTIFY_DECISION_WARN",
+        infoEvent: "BID_NOTIFY_DECISION",
+      });
 
       if (action === "ACCEPTED") {
         // Keep marketplace consistent: accepted offer closes load and rejects pending alternatives.
@@ -1604,19 +1680,13 @@ export default function App() {
         const pendingOthers = loadBids.filter((bid) => bid.id !== bidId && bid.status === "PENDING");
         for (const otherBid of pendingOthers) {
           await updateBidStatusReliable(otherBid.id, "REJECTED", 12000);
-          try {
-            await withTimeout(
-              createNotificationApi({
-                userId: otherBid.driver_id,
-                actorId: user.id,
-                message: `Bilgi: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanında başka teklif kabul edildi.`,
-              }),
-              10000,
-              "Alternatif teklif bildirimi zaman aşımına uğradı (10sn)."
-            );
-          } catch (notifyOtherError) {
-            appendRuntimeLog("warn", "BID_NOTIFY_OTHER_WARN", notifyOtherError?.message || "Other notify failed");
-          }
+          await notifyUserBestEffort({
+            targetUserId: otherBid.driver_id,
+            message: `Bilgi: ${selectedLoadDetail.from} -> ${selectedLoadDetail.to} ilanında başka teklif kabul edildi.`,
+            timeoutMs: 10000,
+            warnEvent: "BID_NOTIFY_OTHER_WARN",
+            infoEvent: "BID_NOTIFY_OTHER",
+          });
         }
       }
 
@@ -1672,13 +1742,6 @@ export default function App() {
     } finally {
       setIsUpdatingRole(false);
     }
-  };
-
-  const showToast = (msg, type = "success", durationMs) => {
-    setToast(msg);
-    setToastType(type);
-    const ttl = typeof durationMs === "number" ? durationMs : (type === "error" ? 9000 : 3000);
-    setTimeout(() => setToast(null), ttl);
   };
 
   const detectCityFromCoordinates = useCallback(async (latitude, longitude) => {
@@ -1783,13 +1846,14 @@ export default function App() {
               ? "Konum alma zaman aşımına uğradı."
               : (error?.message || "Konumdan şehir belirlenemedi.");
         setLocationDetectError(geoMessage);
-        appendRuntimeLog("warn", "LOCATION_CITY_DETECT_FAIL", geoMessage);
+        const isExpectedSkip = code === 1 || /eşleşmesi yapılamadı/i.test(geoMessage);
+        appendRuntimeLog(isExpectedSkip ? "info" : "warn", "LOCATION_CITY_DETECT_FAIL", geoMessage);
         if (!silent) showToast(geoMessage, "error");
       } finally {
         setIsDetectingLocationCity(false);
       }
     },
-    [appendRuntimeLog, detectCityFromCoordinates, isDetectingLocationCity]
+    [appendRuntimeLog, detectCityFromCoordinates, isDetectingLocationCity, showToast]
   );
 
   useEffect(() => {
@@ -1876,6 +1940,7 @@ export default function App() {
     nav,
     pushPersistentError,
     selectedLoadDetail,
+    showToast,
     user?.id,
     withTimeout,
   ]);
@@ -2061,6 +2126,7 @@ export default function App() {
     profile?.full_name,
     pushPersistentError,
     screen,
+    showToast,
     user?.email,
     user?.id,
     withTimeout,
@@ -2281,7 +2347,7 @@ export default function App() {
       return;
     }
     nav("driverFeed");
-  }, [activeRole, nav, user]);
+  }, [activeRole, nav, showToast, user]);
 
   // ─── FILTERS ───
   const [filterFrom, setFilterFrom] = useState("");
@@ -2702,6 +2768,188 @@ export default function App() {
     };
   }, [fetchFeedback]);
 
+  const resetEmployerEditor = useCallback(() => {
+    setEmpForm(createDefaultEmployerForm());
+    setEditingLoadId(null);
+    setEditingLoadMeta(null);
+    setFormErrors({});
+    setPostLoadError("");
+  }, []);
+
+  const handleStartEditLoad = useCallback(
+    async (item) => {
+      if (!user?.id || !item?.load_id) {
+        showToast("İlan düzenlemek için giriş yapmalısın.", "error");
+        return;
+      }
+
+      setActiveFeedActionLoadId(item.load_id);
+      try {
+        let detail = null;
+        try {
+          detail = await withTimeout(
+            fetchLoadDetailsApi(item.load_id),
+            10000,
+            "İlan detay düzenleme sorgusu zaman aşımına uğradı (10sn)."
+          );
+        } catch (primaryError) {
+          appendRuntimeLog("warn", "LOAD_EDIT_DETAIL_SUPABASE_FAIL", primaryError?.message || "Load edit detail failed");
+          detail = await withTimeout(
+            fetchLoadDetailsViaRestApi({
+              loadId: item.load_id,
+              timeoutMs: 12000,
+            }),
+            13000,
+            "İlan detay fallback zaman aşımına uğradı (13sn)."
+          );
+        }
+
+        if (!detail?.id) {
+          throw new Error("Düzenlenecek ilan detayı okunamadı.");
+        }
+
+        if (detail?.employer_id && detail.employer_id !== user.id) {
+          throw new Error("Bu ilanı düzenleme yetkin yok.");
+        }
+
+        const from = detail.origin_city || item.origin_city || "";
+        const to = detail.destination_city || item.destination_city || "";
+        setEmpForm({
+          from,
+          to,
+          type: detail.load_type || item.load_type || "",
+          trailer: detail.trailer_type || item.trailer_type || "Kapalı",
+          price: String(detail.price ?? item.load_price ?? ""),
+          kdv: detail.kdv_included ?? true,
+          fleet: Boolean(detail.is_fleet),
+          trucks: Number(detail.truck_count) || 1,
+          pickupDate: String(detail.pickup_date || item.pickup_date || getIstanbulDateKey()).slice(0, 10),
+          pickupTime: String(detail.pickup_time || item.pickup_time || "09:00").slice(0, 5),
+        });
+        setEditingLoadId(Number(item.load_id));
+        setEditingLoadMeta({ from, to });
+        setFormErrors({});
+        setPostLoadError("");
+        nav("employer");
+        appendRuntimeLog("info", "LOAD_EDIT_MODE_ENTER", `load=${item.load_id}`);
+        showToast("İlan düzenleme moduna geçildi.");
+      } catch (error) {
+        appendRuntimeLog("error", "LOAD_EDIT_MODE_FAIL", error?.message || "Load edit mode failed");
+        showToast(error?.message || "İlan düzenleme ekranı açılamadı.", "error");
+      } finally {
+        setActiveFeedActionLoadId(null);
+      }
+    },
+    [appendRuntimeLog, nav, showToast, user?.id, withTimeout]
+  );
+
+  const handleDeleteLoadFromFeed = useCallback(
+    async (item) => {
+      if (!user?.id || !item?.load_id) {
+        showToast("İlan silmek için giriş yapmalısın.", "error");
+        return;
+      }
+      const routeLabel = `${item.origin_city || "?"} → ${item.destination_city || "?"}`;
+      const ask =
+        typeof window !== "undefined"
+          ? window.confirm(`"${routeLabel}" ilanını silmek istediğine emin misin?`)
+          : true;
+      if (!ask) return;
+
+      setActiveFeedActionLoadId(item.load_id);
+      appendRuntimeLog("info", "LOAD_DELETE_STARTED", `load=${item.load_id}`);
+      try {
+        const accessToken = readCachedAccessToken();
+        let deleted = false;
+        try {
+          if (accessToken) {
+            await withTimeout(
+              deleteLoadViaRestApi({
+                loadId: item.load_id,
+                employerId: user.id,
+                accessToken,
+                timeoutMs: 12000,
+              }),
+              13000,
+              "İlan silme REST zaman aşımına uğradı (13sn)."
+            );
+          } else {
+            await withTimeout(
+              deleteLoadApi({
+                loadId: item.load_id,
+                employerId: user.id,
+              }),
+              11000,
+              "İlan silme zaman aşımına uğradı (11sn)."
+            );
+          }
+          deleted = true;
+        } catch (deleteError) {
+          appendRuntimeLog("warn", "LOAD_DELETE_FAIL", deleteError?.message || "Load delete failed");
+          // Fallback: soft-delete with cancelled status.
+          if (accessToken) {
+            await withTimeout(
+              updateLoadStatusViaRestApi({
+                loadId: item.load_id,
+                status: "cancelled",
+                accessToken,
+                timeoutMs: 12000,
+              }),
+              13000,
+              "İlan iptal fallback zaman aşımına uğradı (13sn)."
+            );
+          } else {
+            await withTimeout(
+              updateLoadStatusApi({
+                loadId: item.load_id,
+                status: "cancelled",
+              }),
+              11000,
+              "İlan iptal fallback zaman aşımına uğradı (11sn)."
+            );
+          }
+          showToast("İlan silinemedi, iptal durumuna alındı.", "success");
+          appendRuntimeLog("info", "LOAD_DELETE_FALLBACK_CANCELLED", `load=${item.load_id}`);
+        }
+
+        if (deleted) {
+          setRealLoads((prev) => prev.filter((load) => Number(load.id) !== Number(item.load_id)));
+          setEmployerFeedItems((prev) => prev.filter((row) => Number(row.load_id) !== Number(item.load_id)));
+          if (selectedLoadDetail?.id && Number(selectedLoadDetail.id) === Number(item.load_id)) {
+            setSelectedLoadDetail(null);
+          }
+          appendRuntimeLog("info", "LOAD_DELETE_OK", `load=${item.load_id}`);
+          showToast("İlan silindi.");
+        }
+
+        try {
+          await withTimeout(
+            Promise.all([fetchLoads({ force: true }), fetchPublicStats({ force: true }), loadEmployerFeed()]),
+            12000,
+            "Silme sonrası liste yenileme zaman aşımına uğradı (12sn)."
+          );
+        } catch (refreshError) {
+          appendRuntimeLog("warn", "LOAD_DELETE_REFRESH_WARN", refreshError?.message || "Delete refresh timeout");
+        }
+      } catch (error) {
+        appendRuntimeLog("error", "LOAD_DELETE_FINAL_FAIL", error?.message || "Load delete final failed");
+        showToast(error?.message || "İlan silinemedi.", "error");
+      } finally {
+        setActiveFeedActionLoadId(null);
+      }
+    },
+    [
+      appendRuntimeLog,
+      fetchLoads,
+      fetchPublicStats,
+      loadEmployerFeed,
+      selectedLoadDetail?.id,
+      showToast,
+      user?.id,
+      withTimeout,
+    ]
+  );
+
   // Form Validation
   const validateForm = () => {
     const errors = {};
@@ -2749,8 +2997,10 @@ export default function App() {
     }
 
     const startTs = Date.now();
+    const isEditMode = Boolean(editingLoadId);
+    const modeLabel = isEditMode ? "UPDATE" : "CREATE";
     setPostLoadError("");
-    appendRuntimeLog("info", "POST_LOAD_STARTED", `${empForm.from} -> ${empForm.to} | ${empForm.type}`);
+    appendRuntimeLog("info", "POST_LOAD_STARTED", `${modeLabel} | ${empForm.from} -> ${empForm.to} | ${empForm.type}`);
     setIsPostingLoad(true);
     try {
       let accessToken = readCachedAccessToken();
@@ -2794,12 +3044,41 @@ export default function App() {
         truck_count: empForm.fleet ? Number(empForm.trucks) || 1 : 1,
         pickup_date: empForm.pickupDate || getIstanbulDateKey(),
         pickup_time: String(empForm.pickupTime || "").trim() || null,
-        employer_id: user.id,
-        status: "open",
         currency: "TRY",
+        ...(isEditMode
+          ? {}
+          : {
+              employer_id: user.id,
+              status: "open",
+            }),
       };
 
-      const publishLoad = async (timeoutMs) => {
+      const mutateLoad = async (timeoutMs) => {
+        if (isEditMode) {
+          if (accessToken) {
+            return withTimeout(
+              updateLoadViaRestApi({
+                loadId: editingLoadId,
+                employerId: user.id,
+                updates: loadData,
+                accessToken,
+                timeoutMs,
+              }),
+              timeoutMs + 2000,
+              `REST update zaman aşımına uğradı (${Math.ceil((timeoutMs + 2000) / 1000)}sn).`
+            );
+          }
+          return withTimeout(
+            updateLoadApi({
+              loadId: editingLoadId,
+              employerId: user.id,
+              updates: loadData,
+            }),
+            timeoutMs,
+            `İlan güncelleme zaman aşımına uğradı (${Math.ceil(timeoutMs / 1000)}sn).`
+          );
+        }
+
         if (accessToken) {
           return withTimeout(
             createLoadViaRestApi({ loadData, accessToken, timeoutMs }),
@@ -2814,13 +3093,13 @@ export default function App() {
         );
       };
 
-      if (!accessToken) {
+      if (!accessToken && !isEditMode) {
         throw new Error("Aktif oturum tokeni alınamadı. Çıkış yapıp tekrar giriş yapın.");
       }
 
-      let createdLoad = null;
+      let createdOrUpdatedLoad = null;
       try {
-        createdLoad = await publishLoad(18000);
+        createdOrUpdatedLoad = await mutateLoad(18000);
       } catch (firstError) {
         const firstMessage = (firstError?.cause?.message || firstError?.message || "").toLowerCase();
         const isTimeout = firstMessage.includes("zaman aşımına uğradı") || firstMessage.includes("timeout");
@@ -2840,7 +3119,7 @@ export default function App() {
 
         if (isAuthError) {
           throw new Error("Oturum yetkisi geçersiz. Lütfen çıkış yapıp tekrar giriş yapın.");
-        } else if (mightNeedProfileRepair) {
+        } else if (!isEditMode && mightNeedProfileRepair) {
           appendRuntimeLog("warn", "POST_LOAD_PROFILE_REPAIR", firstMessage || "Profil satiri dogrulanip yeniden denenecek.");
 
           const ensuredProfile = await withTimeout(
@@ -2857,35 +3136,46 @@ export default function App() {
           setProfile(ensuredProfile);
           appendRuntimeLog("info", "POST_LOAD_PROFILE_READY", `role=${ensuredProfile?.role || "unknown"}`);
 
-          createdLoad = await publishLoad(24000);
+          createdOrUpdatedLoad = await mutateLoad(24000);
         } else if (isTimeout) {
           appendRuntimeLog("warn", "POST_LOAD_RETRY", "İlk deneme timeout, ikinci deneme başlatılıyor.");
-          createdLoad = await publishLoad(30000);
+          createdOrUpdatedLoad = await mutateLoad(30000);
         } else {
           throw firstError;
         }
       }
 
-      const createdLoadId = Number(createdLoad?.id || createdLoad?.[0]?.id || Date.now());
+      if (isEditMode && !createdOrUpdatedLoad?.id) {
+        throw new Error("İlan güncellenemedi. Yetki veya kayıt durumu kontrol edilmeli.");
+      }
+
+      const targetLoadId = Number(createdOrUpdatedLoad?.id || createdOrUpdatedLoad?.[0]?.id || editingLoadId || Date.now());
       const optimisticDbLoad = {
-        id: createdLoadId,
+        id: targetLoadId,
         employer_id: user.id,
-        origin_city: loadData.origin_city,
-        destination_city: loadData.destination_city,
-        distance_km: null,
-        load_type: loadData.load_type,
-        trailer_type: loadData.trailer_type,
-        weight_kg: loadData.weight_kg,
-        price: loadData.price,
-        currency: loadData.currency || "TRY",
-        status: loadData.status || "open",
-        pickup_date: loadData.pickup_date,
-        pickup_time: loadData.pickup_time || null,
-        created_at: new Date().toISOString(),
-        is_urgent: loadData.is_urgent,
-        is_fleet: loadData.is_fleet,
-        truck_count: loadData.truck_count,
-        kdv_included: loadData.kdv_included,
+        origin_city: createdOrUpdatedLoad?.origin_city || loadData.origin_city,
+        destination_city: createdOrUpdatedLoad?.destination_city || loadData.destination_city,
+        distance_km: createdOrUpdatedLoad?.distance_km ?? null,
+        load_type: createdOrUpdatedLoad?.load_type || loadData.load_type,
+        trailer_type: createdOrUpdatedLoad?.trailer_type || loadData.trailer_type,
+        weight_kg: createdOrUpdatedLoad?.weight_kg ?? loadData.weight_kg,
+        price: Number(createdOrUpdatedLoad?.price ?? loadData.price),
+        currency: createdOrUpdatedLoad?.currency || loadData.currency || "TRY",
+        status:
+          createdOrUpdatedLoad?.status ||
+          employerFeedItems.find((row) => Number(row.load_id) === Number(targetLoadId))?.load_status ||
+          loadData.status ||
+          "open",
+        pickup_date: createdOrUpdatedLoad?.pickup_date || loadData.pickup_date,
+        pickup_time: createdOrUpdatedLoad?.pickup_time || loadData.pickup_time || null,
+        created_at:
+          createdOrUpdatedLoad?.created_at ||
+          employerFeedItems.find((row) => Number(row.load_id) === Number(targetLoadId))?.load_created_at ||
+          new Date().toISOString(),
+        is_urgent: createdOrUpdatedLoad?.is_urgent ?? loadData.is_urgent,
+        is_fleet: createdOrUpdatedLoad?.is_fleet ?? loadData.is_fleet,
+        truck_count: Number(createdOrUpdatedLoad?.truck_count ?? loadData.truck_count),
+        kdv_included: createdOrUpdatedLoad?.kdv_included ?? loadData.kdv_included,
         profiles: {
           full_name: profile?.full_name || user?.email || "İşveren",
           avatar_url: profile?.avatar_url || null,
@@ -2894,52 +3184,54 @@ export default function App() {
         },
       };
       const optimisticUiLoad = mapDbToUi(optimisticDbLoad);
-      const nextVisibleLoads = [optimisticUiLoad, ...realLoads.filter((item) => Number(item.id) !== createdLoadId)];
+      const nextVisibleLoads = isEditMode
+        ? realLoads.map((item) => (Number(item.id) === targetLoadId ? optimisticUiLoad : item))
+        : [optimisticUiLoad, ...realLoads.filter((item) => Number(item.id) !== targetLoadId)];
       setRealLoads(nextVisibleLoads);
-      applyLocalStatsFallback(nextVisibleLoads, { incrementLoads: true });
+      applyLocalStatsFallback(nextVisibleLoads, { incrementLoads: !isEditMode });
 
       setPostLoadError("");
       const pickupSummary = formatPickupSchedule(loadData.pickup_date, loadData.pickup_time);
       showToast(
-        empForm.fleet
-          ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında! Yükleme: ${pickupSummary}`
-          : `✅ İlanınız başarıyla yayınlandı! Yükleme: ${pickupSummary}`
+        isEditMode
+          ? `✅ İlan güncellendi! Yükleme: ${pickupSummary}`
+          : empForm.fleet
+            ? `✅ ${empForm.trucks} TIR'lık filo ilanınız yayında! Yükleme: ${pickupSummary}`
+            : `✅ İlanınız başarıyla yayınlandı! Yükleme: ${pickupSummary}`
       );
       setShowConfetti(true);
       setTimeout(() => setShowConfetti(false), 100);
-      setEmpForm({
-        from: "",
-        to: "",
-        type: "",
-        trailer: "Kapalı",
-        price: "",
-        kdv: true,
-        fleet: false,
-        trucks: 1,
-        pickupDate: getIstanbulDateKey(),
-        pickupTime: "09:00",
-      });
-      setFormErrors({});
+      resetEmployerEditor();
       try {
         await withTimeout(
-          Promise.all([fetchLoads({ force: true }), fetchPublicStats({ force: true })]),
+          Promise.all([
+            fetchLoads({ force: true }),
+            fetchPublicStats({ force: true }),
+            isEditMode ? loadEmployerFeed() : Promise.resolve(),
+          ]),
           12000,
           "Liste yenileme zaman aşımına uğradı (12sn)."
         );
       } catch (refreshError) {
         appendRuntimeLog("warn", "POST_LOAD_REFRESH_WARN", refreshError?.message || "Refresh timeout");
-        showToast("İlan yayınlandı. Liste arka planda güncelleniyor.", "success", 7000);
+        showToast(isEditMode ? "İlan güncellendi. Liste arka planda yenileniyor." : "İlan yayınlandı. Liste arka planda güncelleniyor.", "success", 7000);
         setTimeout(() => {
           fetchLoads({ force: true });
           fetchPublicStats({ force: true });
+          if (isEditMode) loadEmployerFeed();
         }, 2500);
       }
-      setFilterFrom(loadData.origin_city);
-      setFilterTo("");
-      setFilterTrailer("");
-      setCity(loadData.origin_city);
-      nav("map");
-      appendRuntimeLog("info", "POST_LOAD_SUCCESS", `ilan_yayin_suresi_ms=${Date.now() - startTs}`);
+      if (isEditMode) {
+        nav("employerFeed");
+        appendRuntimeLog("info", "POST_LOAD_SUCCESS", `ilan_guncelleme_suresi_ms=${Date.now() - startTs}`);
+      } else {
+        setFilterFrom(loadData.origin_city);
+        setFilterTo("");
+        setFilterTrailer("");
+        setCity(loadData.origin_city);
+        nav("map");
+        appendRuntimeLog("info", "POST_LOAD_SUCCESS", `ilan_yayin_suresi_ms=${Date.now() - startTs}`);
+      }
     } catch (error) {
       console.error("Insert error:", error);
       const backendMessage = error?.cause?.message || error?.message || "İlan eklenemedi.";
@@ -3363,6 +3655,7 @@ export default function App() {
                           handleSwitchRole("employer");
                           return;
                         }
+                        resetEmployerEditor();
                         nav("employer");
                       }}
                       className="group w-full py-5 px-5 rounded-3xl text-white text-lg font-black active:scale-[0.98] transition-all relative overflow-hidden shadow-lg hover:shadow-orange-500/20 hover-scale"
@@ -3817,7 +4110,10 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => nav("employer")}
+                    onClick={() => {
+                      resetEmployerEditor();
+                      nav("employer");
+                    }}
                     className="px-3 py-2 rounded-xl bg-orange-500/20 border border-orange-500/40 text-orange-200 text-xs font-bold"
                   >
                     Yeni İlan Ver
@@ -3888,7 +4184,11 @@ export default function App() {
                     <p className="text-slate-400 text-sm mt-1">Yeni ilan verdiğinde teklif akışını burada izleyeceksin.</p>
                   </div>
                 ) : (
-                  employerFeedItems.map((item) => (
+                  employerFeedItems.map((item) => {
+                    const canMutateLoad =
+                      String(item.load_status || "").toLowerCase() === "open" && Number(item.accepted_count || 0) === 0;
+                    const isActionBusy = Number(activeFeedActionLoadId) === Number(item.load_id);
+                    return (
                     <div key={`employer-feed-${item.load_id}`} className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/50">
                       <div className="flex items-start justify-between gap-3 mb-3">
                         <div>
@@ -3939,15 +4239,47 @@ export default function App() {
                         </div>
                       )}
 
-                      <button
-                        type="button"
-                        onClick={() => handleLoadClick(item.load_id)}
-                        className="w-full py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold"
-                      >
-                        İlan Detayını Aç
-                      </button>
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleLoadClick(item.load_id)}
+                          className="py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold"
+                        >
+                          Detay
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!canMutateLoad || isActionBusy}
+                          onClick={() => handleStartEditLoad(item)}
+                          className={`py-2 rounded-lg text-xs font-bold border ${
+                            !canMutateLoad || isActionBusy
+                              ? "bg-slate-900/70 border-slate-700 text-slate-500 cursor-not-allowed"
+                              : "bg-amber-500/15 border-amber-500/40 text-amber-200 hover:bg-amber-500/25"
+                          }`}
+                        >
+                          {isActionBusy ? "..." : "Düzenle"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!canMutateLoad || isActionBusy}
+                          onClick={() => handleDeleteLoadFromFeed(item)}
+                          className={`py-2 rounded-lg text-xs font-bold border ${
+                            !canMutateLoad || isActionBusy
+                              ? "bg-slate-900/70 border-slate-700 text-slate-500 cursor-not-allowed"
+                              : "bg-red-500/15 border-red-500/40 text-red-200 hover:bg-red-500/25"
+                          }`}
+                        >
+                          {isActionBusy ? "..." : "Sil"}
+                        </button>
+                      </div>
+                      {!canMutateLoad && (
+                        <p className="text-[10px] text-slate-500 mt-2 font-semibold">
+                          Kabul alan veya atanmış ilanlar sadece detaydan yönetilebilir.
+                        </p>
+                      )}
                     </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
 
@@ -4598,8 +4930,31 @@ export default function App() {
                 disabled={isPostingLoad}
                 className={`border-0 m-0 p-0 min-w-0 ${isPostingLoad ? "opacity-60 select-none" : ""}`}
               >
-              <h2 className="text-white text-3xl font-black mb-2 tracking-tight">🏢 Hızlı İlan Ver</h2>
-              <p className="text-slate-400 text-sm mb-6">Yük detaylarını girin, binlerce şoföre ulaşın.</p>
+              <h2 className="text-white text-3xl font-black mb-2 tracking-tight">
+                {editingLoadId ? "✏️ İlan Düzenle" : "🏢 Hızlı İlan Ver"}
+              </h2>
+              <p className="text-slate-400 text-sm mb-4">
+                {editingLoadId
+                  ? "İlan bilgilerini güncelle ve tekrar yayın akışına devam et."
+                  : "Yük detaylarını girin, binlerce şoföre ulaşın."}
+              </p>
+              {editingLoadId && (
+                <div className="mb-5 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-amber-200 text-xs font-black">DÜZENLENEN İLAN</p>
+                    <p className="text-slate-200 text-xs font-semibold mt-0.5">
+                      {editingLoadMeta?.from || "?"} → {editingLoadMeta?.to || "?"}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={resetEmployerEditor}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 text-[11px] font-bold"
+                  >
+                    Düzenlemeyi İptal Et
+                  </button>
+                </div>
+              )}
 
               {/* Fleet Toggle - Improved */}
               <button
@@ -4727,7 +5082,15 @@ export default function App() {
                     style={{ background: empForm.fleet ? "linear-gradient(180deg,#fbbf24,#d97706)" : "linear-gradient(180deg,#fb923c,#ea580c)" }}
                   >
                     <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/20 to-transparent" />
-                    <span className="relative drop-shadow-sm">{isPostingLoad ? "YAYINLANIYOR..." : (empForm.fleet ? "FİLO İLANI YAYINLA" : "📢 İLANI YAYINLA")}</span>
+                    <span className="relative drop-shadow-sm">
+                      {isPostingLoad
+                        ? (editingLoadId ? "GÜNCELLENİYOR..." : "YAYINLANIYOR...")
+                        : editingLoadId
+                          ? "💾 İLANI GÜNCELLE"
+                          : empForm.fleet
+                            ? "FİLO İLANI YAYINLA"
+                            : "📢 İLANI YAYINLA"}
+                    </span>
                   </button>
                   {postLoadError && (
                     <div className="mt-3 p-3 rounded-xl bg-red-500/10 border border-red-500/30">

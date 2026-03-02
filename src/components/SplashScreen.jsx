@@ -123,12 +123,11 @@ export default function SplashScreen({ onComplete }) {
       {/* ─── Truck + Exhaust ─── */}
       {phase >= 1 && (
         <div
-          className="absolute splash-truck-stage"
+          className="absolute splash-truck-stage splash-truck-entry"
           style={{
             bottom: "75px",
             left: "50%",
             transform: "translateX(-50%)",
-            animation: "splash-truck-drive 1.7s cubic-bezier(0.16, 1, 0.3, 1) forwards",
           }}
         >
           {/* Headlight glow */}

@@ -813,6 +813,190 @@ export const createLoadViaRestApi = async ({ loadData, accessToken, timeoutMs = 
   }
 };
 
+export const updateLoadApi = async ({ loadId, employerId, updates }) => {
+  const first = await supabase
+    .from("loads")
+    .update(updates)
+    .eq("id", loadId)
+    .eq("employer_id", employerId)
+    .select(
+      "id, employer_id, origin_city, destination_city, distance_km, load_type, trailer_type, weight_kg, price, currency, kdv_included, status, pickup_date, pickup_time, created_at, is_urgent, is_fleet, truck_count"
+    )
+    .maybeSingle();
+
+  if (!first.error) return first.data;
+
+  if (isMissingColumnError(first.error, "pickup_time")) {
+    const fallbackUpdates = { ...updates };
+    delete fallbackUpdates.pickup_time;
+    const retry = await supabase
+      .from("loads")
+      .update(fallbackUpdates)
+      .eq("id", loadId)
+      .eq("employer_id", employerId)
+      .select(
+        "id, employer_id, origin_city, destination_city, distance_km, load_type, trailer_type, weight_kg, price, currency, kdv_included, status, pickup_date, created_at, is_urgent, is_fleet, truck_count"
+      )
+      .maybeSingle();
+    return unwrap(retry, "Failed to update load");
+  }
+
+  return unwrap(first, "Failed to update load");
+};
+
+const patchLoadViaRest = async ({
+  loadId,
+  employerId,
+  payload,
+  accessToken,
+  timeoutMs,
+  includePickupTime = true,
+}) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const select = includePickupTime
+      ? "id,employer_id,origin_city,destination_city,distance_km,load_type,trailer_type,weight_kg,price,currency,kdv_included,status,pickup_date,pickup_time,created_at,is_urgent,is_fleet,truck_count"
+      : "id,employer_id,origin_city,destination_city,distance_km,load_type,trailer_type,weight_kg,price,currency,kdv_included,status,pickup_date,created_at,is_urgent,is_fleet,truck_count";
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/loads?id=eq.${encodeURIComponent(loadId)}&employer_id=eq.${encodeURIComponent(
+        employerId
+      )}&select=${select}`,
+      {
+        method: "PATCH",
+        signal: controller.signal,
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+    const text = await res.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+    if (!res.ok) {
+      const message =
+        (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
+        text ||
+        `HTTP ${res.status}`;
+      throw new Error(`REST load update failed: ${message}`);
+    }
+    if (Array.isArray(parsed)) return parsed[0] || null;
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`REST load update timeout after ${timeoutMs / 1000}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+export const updateLoadViaRestApi = async ({
+  loadId,
+  employerId,
+  updates,
+  accessToken,
+  timeoutMs = 16000,
+}) => {
+  if (!accessToken) {
+    throw new Error("REST load update requires a valid access token.");
+  }
+  try {
+    return await patchLoadViaRest({
+      loadId,
+      employerId,
+      payload: updates,
+      accessToken,
+      timeoutMs,
+      includePickupTime: true,
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error, "pickup_time")) throw error;
+    const fallbackPayload = { ...updates };
+    delete fallbackPayload.pickup_time;
+    return patchLoadViaRest({
+      loadId,
+      employerId,
+      payload: fallbackPayload,
+      accessToken,
+      timeoutMs,
+      includePickupTime: false,
+    });
+  }
+};
+
+export const deleteLoadApi = async ({ loadId, employerId }) => {
+  const res = await supabase
+    .from("loads")
+    .delete()
+    .eq("id", loadId)
+    .eq("employer_id", employerId)
+    .select("id")
+    .maybeSingle();
+  return unwrap(res, "Failed to delete load");
+};
+
+export const deleteLoadViaRestApi = async ({
+  loadId,
+  employerId,
+  accessToken,
+  timeoutMs = 16000,
+}) => {
+  if (!accessToken) {
+    throw new Error("REST load delete requires a valid access token.");
+  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/loads?id=eq.${encodeURIComponent(loadId)}&employer_id=eq.${encodeURIComponent(
+        employerId
+      )}`,
+      {
+        method: "DELETE",
+        signal: controller.signal,
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken}`,
+          Prefer: "return=representation",
+        },
+      }
+    );
+    const text = await res.text();
+    let parsed = null;
+    try {
+      parsed = text ? JSON.parse(text) : null;
+    } catch {
+      parsed = text;
+    }
+    if (!res.ok) {
+      const message =
+        (parsed && typeof parsed === "object" && (parsed.message || parsed.error_description || parsed.error)) ||
+        text ||
+        `HTTP ${res.status}`;
+      throw new Error(`REST load delete failed: ${message}`);
+    }
+    if (Array.isArray(parsed)) return parsed[0] || null;
+    return parsed;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`REST load delete timeout after ${timeoutMs / 1000}s.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
 const postBidViaRest = async ({ payload, accessToken, timeoutMs }) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);

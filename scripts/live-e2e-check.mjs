@@ -429,7 +429,7 @@ const openEmployerBidPanel = async (page) => {
 
     const feedCard = page.locator("div", { hasText: loadType }).first();
     await ensureVisible(feedCard, 45000, "İşveren feed kartında hedef ilan görünmedi.");
-    await feedCard.getByRole("button", { name: /İlan Detayını Aç/i }).click();
+    await feedCard.getByRole("button", { name: /İlan Detayını Aç|Detay/i }).click();
   } else {
     throw new Error("İşveren feed butonu bulunamadı.");
   }
@@ -520,7 +520,7 @@ const verifyEmployerFeedAssignedAndNoTimeout = async (page) => {
     const card = page
       .locator("div", {
         hasText: loadType,
-        has: page.getByRole("button", { name: /İlan Detayını Aç/i }),
+        has: page.getByRole("button", { name: /İlan Detayını Aç|Detay/i }),
       })
       .first();
     await ensureVisible(card, 20000, "İşveren feed’de hedef ilan bulunamadı (final kontrol).");
