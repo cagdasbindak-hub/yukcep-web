@@ -104,6 +104,7 @@ const getRoleSwitchPopupContent = (role) => {
 };
 
 const RELEASE_UPDATES_SEED = [
+  { date: "2026-03-03", title: "Profil menüsü düzeltildi: sağ üst profil butonu tek tıkla açılıyor, ikinci tıkta kapanıyor; ikon kalıcı modern görünüme güncellendi." },
   { date: "2026-03-02", title: "İşveren feed kartlarına İlan Düzenle + İlan Sil aksiyonları eklendi; ilan yönetimi tek ekrandan yapılabiliyor." },
   { date: "2026-03-02", title: "İlan güncelleme/silme akışları canlı DB şema uyumluluğu için fallback ile sertleştirildi (pickup_time olmayan ortamlarda da çalışır)." },
   { date: "2026-03-02", title: "Açılış animasyonu güncellendi: TIR merkezde durup şoför selam animasyonu gösteriyor." },
@@ -159,7 +160,7 @@ const FEEDBACK_FETCH_COOLDOWN_MS = 2400;
 const REPORT_RATE_LIMIT_MS = 5 * 60 * 1000;
 const FEEDBACK_RATE_LIMIT_MS = 45 * 1000;
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "2026.03.01";
-const FEEDBACK_REVIEW_VERSION = 5;
+const FEEDBACK_REVIEW_VERSION = 6;
 
 const getIstanbulDateKey = () => {
   try {
@@ -345,6 +346,21 @@ const sanitizeFeedbackItems = (items = []) =>
     .slice(0, 80);
 
 const MANUAL_FEEDBACK_DECISIONS = {
+  17: {
+    statusTag: "yapildi",
+    moderationStatus: "published",
+    codexComment: "İncelendi. Tırport benzeri canlı ETA/rota görünürlüğü roadmap için güçlü aday; bu geri bildirimde istendiği gibi sadece öneri notu düşüldü, entegrasyon yapılmadı.",
+  },
+  16: {
+    statusTag: "yapildi",
+    moderationStatus: "published",
+    codexComment: "Tamamlandı. Sağ üst profil tetikleyicisi kalıcı modern ikon görünümüne güncellendi.",
+  },
+  15: {
+    statusTag: "yapildi",
+    moderationStatus: "published",
+    codexComment: "Tamamlandı. Profil menüsü tek tıkla açılıp tekrar tıklandığında kapanacak şekilde toggle davranışı düzeltildi.",
+  },
   14: {
     statusTag: "yapildi",
     moderationStatus: "published",
@@ -422,7 +438,31 @@ const normalizeFeedbackStatusTag = (value) =>
 
 const applyManualFeedbackDecision = (item) => {
   const numericId = Number(item?.id);
-  const decision = Number.isFinite(numericId) ? MANUAL_FEEDBACK_DECISIONS[numericId] : null;
+  const explicitDecision = Number.isFinite(numericId) ? MANUAL_FEEDBACK_DECISIONS[numericId] : null;
+  const normalizedContent = String(item?.content || "").toLocaleLowerCase("tr-TR");
+  let inferredDecision = null;
+  if (!explicitDecision) {
+    if (normalizedContent.includes("profil iconunu değiştir")) {
+      inferredDecision = {
+        statusTag: "yapildi",
+        moderationStatus: "published",
+        codexComment: "Tamamlandı. Sağ üst profil tetikleyicisi kalıcı modern ikon görünümüne güncellendi.",
+      };
+    } else if (normalizedContent.includes("bir daha tıkladığında kapanması lazım") || normalizedContent.includes("kapanmıyor")) {
+      inferredDecision = {
+        statusTag: "yapildi",
+        moderationStatus: "published",
+        codexComment: "Tamamlandı. Profil menüsü tek tıkla açılıp tekrar tıklandığında kapanacak şekilde toggle davranışı düzeltildi.",
+      };
+    } else if (normalizedContent.includes("tirport.com")) {
+      inferredDecision = {
+        statusTag: "yapildi",
+        moderationStatus: "published",
+        codexComment: "İncelendi. Tırport benzeri canlı ETA/rota görünürlüğü roadmap için güçlü aday; bu geri bildirimde istendiği gibi sadece öneri notu düşüldü, entegrasyon yapılmadı.",
+      };
+    }
+  }
+  const decision = explicitDecision || inferredDecision;
   const fallbackComment =
     item?.codex_comment && String(item.codex_comment).trim()
       ? item.codex_comment
@@ -3516,13 +3556,27 @@ export default function App() {
                     <div className="relative">
                       <button
                         onClick={() => {
-                          setShowProfileCard(true);
+                          setShowProfileCard((prev) => !prev);
                           setShowNotifications(false);
                         }}
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm active:scale-95 transition-all border-2 border-blue-500/50"
+                        aria-label="Profil menüsünü aç veya kapat"
+                        aria-expanded={showProfileCard}
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-white active:scale-95 transition-all border-2 border-cyan-300/70 shadow-lg shadow-cyan-500/30 overflow-hidden"
                         style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}
                       >
-                        {getInitials(profile?.full_name)}
+                        {profile?.avatar_url ? (
+                          <img src={profile.avatar_url} alt="Profil" className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="relative flex items-center justify-center w-full h-full">
+                            <span className="absolute inset-0 bg-gradient-to-br from-cyan-300/25 to-transparent" />
+                            <User size={18} className="relative z-10 text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.35)]" />
+                            <span
+                              className={`absolute right-0.5 bottom-0.5 w-2.5 h-2.5 rounded-full border border-slate-950 ${
+                                activeRole === "employer" ? "bg-orange-400" : activeRole === "driver" ? "bg-emerald-400" : "bg-slate-400"
+                              }`}
+                            />
+                          </span>
+                        )}
                       </button>
                       {/* Profile Card Dropdown */}
                       {showProfileCard && (
